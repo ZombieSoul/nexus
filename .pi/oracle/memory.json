@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "project": "minecraft",
+  "personality": {
+    "observations": [],
+    "working_style": [],
+    "preferences": [],
+    "projects_known": [],
+    "communication": "",
+    "updated": "2026-06-11T16:34:59.500Z"
+  },
+  "knowledge": [],
+  "dead_ends": [],
+  "working_context": null,
+  "observations": [],
+  "stats": {
+    "total_extractions": 0,
+    "total_memories": 0,
+    "total_sessions": 1,
+    "last_session": "2026-06-11T16:34:59.500Z"
+  }
+}

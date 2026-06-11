@@ -1,0 +1,26 @@
+# Mod jars - track only configs and source, not binaries
+mods/*.jar
+!mods/.gitkeep
+
+# Build outputs
+custom-mods/build/
+custom-mods/.gradle/
+custom-mods/out/
+custom-mods/*.iml
+custom-mods/.idea/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Minecraft runtime
+run/
+logs/
+saves/
+world/
+crash-reports/
+.local/
+
+# KubeJS cache
+kubejs/probe/
+kubejs/.cache/
