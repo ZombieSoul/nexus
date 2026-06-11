@@ -20,9 +20,9 @@ Custom Minecraft modpack combining existing community mods with custom-built mod
 ```
 
 ## Modpack Details
-- **MC Version:** (TBD)
-- **Mod Loader:** (Forge / Fabric / NeoForge — TBD)
-- **Theme:** (TBD)
+- **MC Version:** 1.21.1
+- **Mod Loader:** NeoForge (primary), with cross-loader support (Sinytra Connector / Cardinal etc.)
+- **Theme:** (TBD — needs planning)
 
 ## Workflow
 1. **Existing Mods** → curated list in `mods/`, configured in `config/`
