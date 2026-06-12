@@ -11,12 +11,19 @@
   },
   "knowledge": [],
   "dead_ends": [],
-  "working_context": null,
+  "working_context": {
+    "current_task": "Awaiting initial conversation",
+    "progress": "System initialized and awaiting input.",
+    "next_steps": "Provide conversation text to begin knowledge extraction.",
+    "blockers": "No conversation has been provided yet for analysis.",
+    "updated": "2026-06-12T04:34:32.431Z"
+  },
   "observations": [],
   "stats": {
-    "total_extractions": 0,
+    "total_extractions": 1,
     "total_memories": 0,
-    "total_sessions": 1,
-    "last_session": "2026-06-11T16:34:59.500Z"
+    "total_sessions": 2,
+    "last_session": "2026-06-12T15:51:03.800Z",
+    "last_extraction": "2026-06-12T04:34:32.431Z"
   }
 }
