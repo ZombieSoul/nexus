@@ -113,21 +113,39 @@ Server-to-server state sync is **left to mods**, deliberately. The engine provid
 
 ---
 
-## The Singleplayer Problem (Honest Caveat)
+## Singleplayer = Local Server (Decided)
 
-This is the one real weakness of the EQEmu model.
+**Decision (June 2026): Client-server is the primary and only architecture.**
 
-**Luanti singleplayer = one local server + one client in the same process.** The multi-server transfer model requires *separate server processes*. So out of the box, this architecture is **multiplayer/server-first.**
+No hybrid code paths. No Y-stack fallback. The multi-server model is the model.
 
-### Options for singleplayer
-| Approach | How | Verdict |
-|----------|-----|---------|
-| **A. Auto-spawn local servers** | Wrapper script launches galaxy servers as background processes on localhost; transfer_player jumps between ports | Doable but heavy — player's machine runs N servers. Fine for 2-3 galaxies, ugly at 5+ |
-| **B. Hybrid: singleplayer = Y-stack, server = multi-server** | Same game, different dimension backend depending on mode | Most code shared, but two code paths to maintain. The cleanest answer |
-| **C. Ship as hosted-first** | Like many Luanti games, primarily a server experience; singleplayer is "local host" | Aligns with Luanti culture. Some friction for casual players |
-| **D. Wait for engine-level dimensions** | Issue #4428, 10 years open | Don't hold breath |
+### How "singleplayer" works
+There is no separate singleplayer mode. To play solo, the player **runs the server locally and connects to it as the only client.** This is handled by a launcher script that:
+1. Starts the proxy broker
+2. Starts the galaxy server processes (localhost ports)
+3. Connects the client to `localhost:30000`
 
-**Recommendation:** Option B (hybrid). Singleplayer Y-stacks all galaxies in one world (accepting the cramped-but-works tradeoff). Server deployments use the full multi-server architecture for true galaxy separation. The Stargate mod detects which mode it's in and routes travel accordingly.
+From the player's perspective: click "Play," the launcher does the rest, they're in the game. From the system's perspective: it's identical to a multiplayer server with one player. **One code path, tested one way.**
+
+### Why this is the right call
+- **Eliminates the biggest complexity** — no dual Y-stack/multi-server backend to maintain
+- **Aligns with Luanti culture** — hosted server is the norm; singleplayer is just local hosting
+- **Matches EQEmu exactly** — EQEmu is server-first too; solo players run their own server
+- **State sync is the same code** whether local or remote
+- **Resource cost is honest** — the player's machine runs N galaxy servers. Fine for modern hardware with 2-3 active galaxies. We lazy-start galaxy servers on first dial so only visited galaxies consume resources
+
+### The launcher (ships with the game)
+```
+play.sh / play.bat
+  ├── Starts mt-multiserver-proxy on :30000
+  ├── Registers galaxy servers (config-driven)
+  ├── Spawns Milky Way server immediately (home galaxy)
+  ├── Spawns other galaxies on first dial (lazy)
+  ├── Launches Luanti client → connects to localhost:30000
+  └── On exit: saves & stops servers
+```
+
+Config file (`galaxies.conf`) lets server admins add/remove galaxies, set ports, bind addresses for real multi-host deployments. Local players never touch it — defaults just work.
 
 ---
 
@@ -158,7 +176,7 @@ This is the one real weakness of the EQEmu model.
 | First galaxy content (5-6 dimensions) | 3-4 weeks |
 | **Vertical slice MVP** | **~3-4 months** |
 
-This is longer than the "couple months" optimistic estimate, but it's a *real* timeline for a *working* game, not a toy. The multi-server architecture adds robustness that the pure Y-stack approach can't match.
+This is longer than the "couple months" optimistic estimate, but it's a *real* timeline for a *working* game, not a toy. Committing to client-server-only (no hybrid) keeps it clean — one backend to build and test.
 
 ---
 
@@ -170,23 +188,24 @@ This is longer than the "couple months" optimistic estimate, but it's a *real* t
 | Performance | ✅ Scales per dimension | ❌ One world, one bottleneck |
 | Power-scaling mapping | ✅ Perfect (cheap jump vs expensive transfer) | ⚠️ Forced (all just Y-teleports) |
 | Loading screens as travel moment | ✅ Natural | ❌ None (instant) |
-| Singleplayer | ⚠️ Needs hybrid/workaround | ✅ Native |
+| Singleplayer | ✅ Local server (one code path) | ✅ Native |
 | Implementation complexity | ⚠️ Higher (state sync) | ✅ Lower |
 | Future-proofing | ✅ Aligns with engine roadmap (#14129) | ⚠️ Dead-end architecture |
 | Authentic to Stargate feel | ✅ Wormhole = loading screen | ❌ Teleport = no drama |
 
-**The multi-server model wins on everything except singleplayer simplicity.** And the singleplayer problem has a hybrid workaround.
+**The multi-server model wins across the board** now that singleplayer is just local hosting.
 
 ---
 
-## Recommendation
+## Recommendation (Committed)
 
-**The EQEmu / multi-server model is the right architecture for Luanti.** It's:
+**The EQEmu / multi-server model is THE architecture. Client-server only, no hybrid.** Singleplayer = run the server locally.
+
+This is:
 1. What the engine team is building toward (#14129)
 2. Workable today via the proxy
 3. A perfect match for our power-scaling design
 4. Authentic to the Stargate fantasy (wormhole travel = server transfer)
-
-The pure Y-stack approach is a fallback for singleplayer mode, not the primary architecture.
+5. **One code path** — no singleplayer/server branching to maintain
 
 **Next step:** Prototype the transfer + state sync on a local 2-server setup. Prove the player can dial from Milky Way server to Pegasus server and arrive with their inventory intact. That's the riskiest piece, and de-risking it unlocks everything else.
