@@ -1,10 +1,58 @@
 # Luanti Port Feasibility Assessment
 
+## ⚠️ Critical Finding: Luanti Has No Real Dimension System
+
+**This is the single biggest risk for our concept on Luanti.** Deep-dive research (June 2026) revealed:
+
+### The Problem
+Luanti has **no native dimension support**. A Luanti world is ONE continuous vertical space (Y from -30927 to +30927, ~62000 blocks total). There are no separate dimension instances like Minecraft has (DIM-1, DIM1, separate chunk storage, separate seeds).
+
+### How Luanti Mods Fake Dimensions (Y-Stacking)
+Both VoxeLibre (the MC clone) and the multidimensions mod use the **same trick**: they stack "dimensions" at different Y-coordinate ranges in the single world, with dead void between them.
+
+Evidence from VoxeLibre source (`mcl_worlds/init.lua`):
+```lua
+-- "Dimension" is literally just a Y-coordinate check
+function mcl_worlds.pos_to_dimension(pos)
+    local _, dim, dim_id = y_to_layer(pos.y)  -- reads Y value
+    return dim, dim_id
+end
+-- Overworld = high Y, End = middle Y, Nether = low Y, void between
+```
+
+The multidimensions mod does the same — `register_dimension(name, def)` assigns each dimension a `dim_y` (start Y) and `dim_height`, and they stack vertically.
+
+### The 10-Year Open Feature Request
+True dimensions have been requested since 2016:
+- **Issue [#4428](https://github.com/luanti-org/luanti/issues/4428):** "Different Dimensions / Other worlds"
+- **207 comments**, labeled **"Concept approved"** + **"High priority"**
+- **Still open and unimplemented after 10 years**
+- The server-transfer PR (#11175) was **closed and NOT merged**
+- No multiworld mod ecosystem exists (zero search results)
+
+### What This Means For Us
+Our concept needs 15+ distinct dimensions across 4+ galaxies. Options:
+
+| Approach | How It Works | Verdict |
+|----------|-------------|--------|
+| **Y-stacking** | Stack all dimensions vertically in one world | Proven for 3 (VoxeLibre). Unproven for 15+. Shared seed, shared sky cycle |
+| **Separate worlds per galaxy** | Each galaxy = different world folder; transfer player between them | No API exists. Must build it. Loading screens between galaxies |
+| **Fork Luanti engine** | Implement true dimensions in C++ | The Luanti team hasn't done this in a decade. Not realistic |
+
+### The Silver Lining: Limitation As Design
+If we combine Y-stacking (within a galaxy) with separate worlds (per galaxy), the limitation actually maps to our power scaling:
+- **Intra-galaxy dial** (100K FE) = Y-teleport within a world (instant, cheap)
+- **Intergalactic dial** (100B FE / ZPM) = world transfer (loading screen, expensive)
+
+The technical constraint ENFORCES the game design. But it's still more work than MC where dimensions just exist natively.
+
+---
+
 ## Executive Summary
 
-**Replicating this pack in Luanti is theoretically possible but practically a massive undertaking.** The core concept translates beautifully (and Lua is native), but you'd be building 70%+ of the content from scratch because the Luanti ecosystem lacks nearly every mod our design depends on.
+**The dimension situation is the make-or-break question for Luanti.** Lua is native and beautiful for our gate-programming concept, but Luanti has NO native dimension system — only Y-coordinate stacking tricks. For a concept built on 15+ dimensions across multiple galaxies, this is a genuine architectural deficit.
 
-**Recommendation:** Pursue this as a *long-term second platform*, not a parallel development. Build the Minecraft NeoForge pack first, then evaluate a Luanti port of the core mechanics once the design is proven.
+**Revised Recommendation:** The dimension problem needs to be solved (or accepted) before committing to Luanti. See the "Dimension Architecture" section below for the hybrid approach that could work. If the Y-stacking limitation is acceptable, Luanti becomes viable. If not, Minecraft is the only path.
 
 ---
 
@@ -209,25 +257,125 @@ For this specific design — which leans heavily on existing dimension mods, tec
 
 ---
 
+## Dimension Architecture: How To Solve It On Luanti
+
+This is THE technical problem. Three approaches, ranked by feasibility:
+
+### Approach 1: All-In-One-World (Y-Stacking) — Simplest
+Put every dimension in a single world at different Y ranges.
+
+```
+Y +30000  ┌─ Void (Tier 5 endgame)           ─┐ ~3000 blocks
+          │  (dead void gap)                   │
+Y +24000  ├─ Aether / Sky Realms (Tier 3)    ─┤ ~3000 blocks
+          │  (dead void gap)                   │
+Y +18000  ├─ Overworld ("Earth", Tier 0)     ─┤ ~3000 blocks
+          │  (dead void gap)                   │
+Y +12000  ├─ Twilight Forest (Tier 2)        ─┤ ~3000 blocks
+          │  (dead void gap)                   │
+Y  +6000  ├─ Abydos (Tier 1, desert)         ─┤ ~3000 blocks
+          │  (dead void gap)                   │
+Y       0 ├─ Nether (vanilla)                ─┤ ~3000 blocks
+          │  (dead void gap)                   │
+Y  -6000  ├─ Cavum Tenebrae (crushed world)  ─┤ ~3000 blocks
+          │  (dead void gap)                   │
+Y -12000  ├─ Undergarden (Tier 4)            ─┤ ~3000 blocks
+          │  (dead void gap)                   │
+Y -30000  └─ End / Lantea / etc.             ─┘
+```
+
+**Pros:** Simple. One world. Instant teleportation (just move Y). The multidimensions mod already does this.
+**Cons:**
+- Shared world seed (mitigated: offset noise per dimension so they look different)
+- Shared day/night cycle (mitigated: override sky per Y-range — VoxeLibre does this)
+- ~62000 blocks total = tight for 15+ dimensions (need ~2000-3000 blocks each)
+- All chunks load in one world = higher memory/ram usage
+- Dimensions aren't independent (one corrupts, all affected)
+- **Galaxy concept doesn't exist** — everything is "the same world," just different elevations
+
+**Verdict:** Works for a SMALL number of dimensions (3-6). Clunky for our full 15+ concept. No galaxy separation.
+
+### Approach 2: Hybrid (Separate Worlds Per Galaxy) — Best Fit ✅
+Each galaxy is a separate Luanti world (folder). Dimensions within a galaxy are Y-stacked.
+
+```
+milky_way/          ← World folder (Galaxy 0)
+  ├── Overworld     (Y: +15000 to +19000)
+  ├── Abydos        (Y:  +5000 to  +9000)
+  ├── Chulak        (Y:  -1000 to  +3000)
+  ├── Nether        (Y:  -9000 to  -5000)
+  ├── End           (Y: -19000 to -15000)
+  └── Twilight Frst (Y: -26000 to -22000)
+
+pegasus/            ← World folder (Galaxy 1, needs ZPM to reach)
+  ├── Lantea        (Y: +10000 to +16000, ocean world)
+  └── Custom dims   (Y-stacked)
+
+andromeda/          ← World folder (Galaxy 2)
+  └── Tier 4 dims   (Y-stacked)
+
+void/               ← World folder (Galaxy 3, endgame)
+  └── Tier 5 dims   (Y-stacked)
+```
+
+**How Stargate travel works:**
+- **Intra-galaxy dial** (100K FE): `player:set_pos(new_y)` — instant teleport within world
+- **Intergalactic dial** (100B FE / ZPM): transfer player to a different world folder
+
+**The world-transfer mechanic we'd build:**
+1. Save player inventory, health, metadata to a shared state file
+2. Disconnect from current world / save & exit
+3. Load destination world
+4. Restore player state at destination Stargate coordinates
+5. In singleplayer: brief loading screen (like MC dimension travel)
+6. On server: world switching or multiple server instances
+
+**Pros:**
+- Galaxy separation is REAL (separate worlds)
+- Power scaling maps perfectly (cheap = Y-teleport, expensive = world switch)
+- Each galaxy can have its own worldgen seed, its own rules
+- Memory: only one galaxy's chunks loaded at a time
+- Maps to our design's intent (galaxies are distant, require ZPM)
+
+**Cons:**
+- **No API exists for this** — we build the world-transfer system from scratch
+- Loading screen between galaxies (acceptable — MC has this too)
+- Inventory syncing is the hard part (player state must persist across worlds)
+- Server setup is more complex (multiple worlds to manage)
+
+**Verdict:** This is the approach that turns Luanti's limitation into our feature. Most work, best result.
+
+### Approach 3: Server Cluster (Proper Multiworld) — Most Complex
+Run each galaxy as a separate Luanti server process. Stargate = server transfer.
+
+**Pros:** True isolation. Each galaxy scales independently. Can run on different hardware.
+**Cons:** Massive ops overhead. Only viable for a hosted server, not singleplayer. The transfer PR (#11175) was never merged.
+
+**Verdict:** Server-only, not suitable for a downloadable modpack. Disqualified.
+
+---
+
 ## Technical Notes (If We Do Pursue Luanti)
 
 ### Luanti Modding Basics
 - Mods are Lua scripts (`init.lua` + `mod.conf`)
 - No compilation — edit and reload
 - Full game API access (nodes, entities, mapgen, formspecs/GUIs)
-- Dimensions = separate mapgens with `minetest.register_mapgen()`
+- Dimensions = Y-stacked mapgen regions (NOT separate instances)
 - Energy = define your own system (no standard like Forge Energy)
 
 ### What a Luanti Stargate Mod Would Need
 - Portal nodes with custom rendering
 - Dialing logic (symbol sequences, validation)
 - Energy storage & transfer system
-- Dimension teleportation via `minetest.emerge_area` + player relocation
+- Intra-world teleportation (Y-range jump) — trivial
+- **Cross-world transfer system** — must be built from scratch
 - Computer integration (wrap LWComputers or build own)
 - Address book / discovery system
-- Estimated: 3-6 months for a solo developer to reach feature-parity with SGJ's core
+- Estimated: with AI assistance, 2-4 weeks for core gate + single-world travel; +2-4 weeks for cross-world transfer system
 
 ### Resources
 - Luanti modding docs: https://api.luanti.org/
 - Rubenwardy's modding book: https://rubenwardy.com/minetest_modding_book/
-- Example: multidimensions mod for dimension patterns
+- multidimensions mod: reference for Y-stacking implementation
+- VoxeLibre `mcl_worlds`: reference for dimension sky/weather override
