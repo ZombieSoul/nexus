@@ -1,180 +1,267 @@
-# Tiered Dimensions Modpack — Design Document
+# Stargate: Ascension — Modpack Design Document
 
 ## Vision
-A Minecraft 1.21.1 NeoForge modpack centered around **tiered dimensional progression**. Players start in an enhanced Overworld, then unlock progressively harder dimensions, each containing unique resources needed to tackle the next tier. Inspired by TownCraft's spirit of exploration and tech, but rebuilt around dimensional gating.
+A Minecraft 1.21.1 NeoForge modpack centered around **Stargate-based tiered dimensional progression**. Players discover an ancient Stargate near spawn — unpowered, mysterious, and locked. Through tech progression (Create → Immersive Engineering → Mekanism), CC: Tweaked programming, and exploration, players power up their gate, discover addresses, and dial into progressively more dangerous dimensions containing unique resources needed to advance further.
+
+*Inspired by TownCraft's spirit of exploration + tech, rebuilt around Stargate mythology.*
 
 ---
 
-## Dimensional Tiers (Draft)
+## The Stargate System
 
-### Tier 0 — The Overworld (Starting Zone)
-**Difficulty:** Vanilla-easy | **Purpose:** Foundation, early tech, basic survival
-- Enhanced with **Terralith** for vastly better biomes and exploration
-- All vanilla ores + basic tech resources
-- Early game: stone → iron → diamond gear progression
-- Tech tree starts here (Create basics, Immersive Engineering)
-- Guns become available mid-tier (TaCZ)
-- **Goal:** Defeat a regional boss or complete a questline to earn the "key" to Tier 1
+### Core Mod: **Stargate Journey** (`sgjourney`)
+Open-source, actively maintained for 1.21.1 NeoForge. Features:
+- Stargates spawn as ancient structures in the world — **cannot be crafted** (initially)
+- **Symbol-based dialing** — Milky Way & Pegasus symbol sets
+- **Address system** — valid symbol sequences connect to dimensions
+- **Naquadah** — power resource for generators
+- **CC: Tweaked integration** — ComputerCraft peripherals for programmatic gate control
+- **Auto-dialer** items for saved addresses
+- **Built-in dimensions**: Abydos, Chulak, Cavum Tenebrae, Lantea
+- **Energy system**: Power cells, fusion cores, zero-point modules
 
-### Tier 1 — The Nether (Expanded)
-**Difficulty:** Medium | **Purpose:** First challenge dimension
-- Enhanced with **Incendium** for massive Nether overhaul
-- **Deeper and Darker** — new Sculk dimension accessible from deep dark
-- Unique resources: Nether alloys, soul-infused materials, blaze-derived power
-- **L2 Hostility** scales mob difficulty
-- **Goal:** Defeat a Nether boss, gather enough resources to craft Tier 2 portal
-
-### Tier 2 — The Twilight Forest
-**Difficulty:** Medium-Hard | **Purpose:** Adventure + exploration focus
-- Classic **Twilight Forest** — dense forests, lich towers, boss progression
-- Unique resources: Steeleaf, Fiery Ingot, Twilight-specific materials
-- Boss-gated progression (Naga → Lich → Hydra → etc.)
-- Contains materials needed for Tier 3 gear
-- **Goal:** Clear the Twilight Forest boss chain, craft dimensional key
-
-### Tier 3 — The Aether / Skylands
-**Difficulty:** Hard | **Purpose:** Sky dimension, advanced materials
-- **The Aether** + **Deep Aether** — floating islands, unique mobs
-- Enhanced End with **Nullscape** for alien/bizarre terrain
-- **BetterEnd** for End overhaul with unique biomes and resources
-- Unique resources: Aetherium, End crystals, gravity-defying materials
-- Advanced tech (Mekanism, AE2) needed to process these materials
-- **Goal:** Defeat Aether/End bosses, craft gateway to Tier 4
-
-### Tier 4 — The Undergarden / Deep Realms
-**Difficulty:** Very Hard | **Purpose:** Underground horror, endgame materials
-- **The Undergarden** — dark, hostile underground dimension
-- **Dimensional Doors** — liminal pocket dimensions with rare loot
-- Unique resources: Forgotten metals, living materials, soul-forged alloys
-- Mobs hit hard, environmental hazards
-- **Goal:** Survive long enough to gather materials for final tier
-
-### Tier 5 — The Void / Endgame
-**Difficulty:** Extreme | **Purpose:** Final challenge, ultimate rewards
-- Custom dimension (we build this) or use **RFTools Dimensions**
-- Boss rush encounters using **Bosses of Mass Destruction**
-- Unique resources: God-tier materials, cosmetic rewards, creative-flight items
-- **Goal:** Beat the final boss, unlock creative conveniences, "win" the pack
+### Our Custom Extensions (via KubeJS + custom mod)
+- **Address discovery**: Symbols/glyphs found as rare loot in structures, boss drops, or crafted from dimensional materials
+- **Tier-gated addresses**: You can *dial* any address but the gate won't connect without sufficient power tier
+- **Mining dimensions**: Procedurally generated worlds (RFTools Dimensions or custom) for resource gathering at each tier
+- **Themed progression dimensions**: Hand-crafted experiences for boss fights and story progression
 
 ---
 
-## Core Mod Categories
+## Dimensional Tiers
 
-### 🔧 Tech & Automation
-| Mod | Role |
-|-----|------|
-| **Create** (+ addons) | Core tech, kinetic power, early-mid automation |
-| **Immersive Engineering** | Mature tech tree, power gen, multiblocks |
-| **Mekanism** | Late-game tech, advanced processing |
-| **Applied Energistics 2** | Digital storage, autocrafting |
-| **Immersive Aircraft** | Early flight for dimension exploration |
+### Tier 0 — The Overworld ("Earth")
+**Difficulty:** Easy | **Gate Status:** Found but unpowered
+- Enhanced with **Terralith** for 100+ biomes, real exploration
+- The Stargate spawns within ~500 blocks of origin, in a buried ancient structure
+- **Early game loop**: Survive → Build basic tech → Discover Naquadah → Power the gate
+- **Tech path**: Create (kinetic) → Immersive Engineering (power gen) → Naquadah Generator
+- **CC: Tweaked**: First computers, learn to interface with the gate
+- Resources: Vanilla ores + Naquadah (rare, deep underground)
+- **Gate requirement to unlock Tier 1**: Build a Naquadah generator + dial first known address (found in a temple/structure)
+- **Key mods**: Create, IE, CC: Tweaked, Terralith, TaCZ (guns), Immersive Aircraft
 
-### ⚔️ Combat & Adventure
-| Mod | Role |
-|-----|------|
-| **TaCZ** (Timeless & Classics Zero) | Guns and firearms |
-| **Mowzie's Mobs** | High-quality animated boss encounters |
-| **Bosses of Mass Destruction** | Epic boss fights |
-| **Alex's Mobs** | Diverse creature ecosystem |
-| **L2 Hostility** | Mob difficulty scaling by dimension/area |
-| **Ars Nouveau** | Magic combat option alongside tech |
+### Tier 1 — Abydos ("The Desert World")
+**Difficulty:** Medium | **Gate Status:** First off-world connection
+- Built-in Stargate Journey dimension OR custom desert dimension
+- Desert ruins, ancient temples, sandstorms
+- **Unique resources**: Desert crystals, sand-forged alloys, ancient tech scraps
+- New ores that require Tier 1 processing (Create additions)
+- **Boss**: Temple guardian boss drops symbol fragments for next address
+- **Mining dimension**: A parallel barren world for resource extraction
+- **Gate requirement for Tier 2**: Collect all symbol fragments → assemble address → power upgrade needed
 
-### 🌍 Dimensions & Worldgen
-| Mod | Role |
-|-----|------|
-| **Terralith** | Overworld biome overhaul (100+ biomes) |
-| **Incendium** | Nether biome overhaul |
-| **Nullscape** | End dimension overhaul |
-| **BetterEnd** | End enhancement with new biomes |
-| **BetterNether** | Nether enhancement (with Incendium?) |
-| **Twilight Forest** | Classic adventure dimension |
-| **The Aether** | Sky dimension |
-| **The Undergarden** | Dark underground dimension |
-| **Deeper and Darker** | Sculk dimension |
-| **Dimensional Doors** | Pocket dimensions, mystery |
-| **Immersive Portals** | Seamless dimension transitions (if stable on 1.21.1 NeoForge) |
+### Tier 2 — Twilight Forest ("The Dark Forest")
+**Difficulty:** Medium-Hard | **Gate Status:** Requires advanced power
+- **Twilight Forest** — dense forests, lich towers, structured boss chain
+- **Unique resources**: Steeleaf, Fiery Ingot, Twilight-imbued materials
+- Boss-gated *within* the dimension (Naga → Lich → Hydra → Knight Phantom → Ur-Ghast)
+- Materials needed for Tier 3 armor and Naquadah refining
+- **CC: Tweaked**: Automated Stargate dialing, logging expeditions
+- **Gate requirement for Tier 3**: Defeat the final TF boss, craft dimensional key
 
-### 🔐 Progression & Gating
-| Mod | Role |
-|-----|------|
-| **KubeJS** | Custom recipes, dimension access gating, quest logic |
-| **FTB Quests** | Visual quest book for guiding players |
-| **JEI** | Recipe viewing |
-| **Custom Portal API Reforged** | Custom portal creation per dimension |
-| **L2 Hostility** | Mob scaling tied to dimension tier |
-| **Silent's Power Scale** or **RPG Mob Leveling** | Difficulty scaling |
-| **Dimensional Structure Restrict** | Control what generates per dimension |
+### Tier 3 — The Aether + BetterEnd ("Sky Realms")
+**Difficulty:** Hard | **Gate Status**: Requires heavy power infrastructure
+- **The Aether** — floating islands, unique mobs, dungeon crawling
+- **BetterEnd + Nullscape** — alien End biomes, bizarre terrain
+- **Unique resources**: Aetherium, End crystal alloys, gravity-defying metals
+- **Advanced tech unlocks**: Mekanism processing, AE2 digital storage
+- **Bosses**: Aether boss, enhanced Ender Dragon
+- **Gate requirement for Tier 4**: Craft a Zero Point Module (top-tier power source)
 
-### 🧰 Utilities
-| Mod | Role |
-|-----|------|
-| **Waystones** | Teleportation network within dimensions |
-| **Curios / Accessories** | Accessory/bauble slots |
-| **Sophisticated Storage** | Tiered storage solutions |
-| **Supplementaries** | QoL blocks and items |
+### Tier 4 — The Undergarden + Deep Dark ("The Abyss")
+**Difficulty:** Very Hard | **Gate Status**: Requires Zero Point Module
+- **The Undergarden** — hostile underground dimension, environmental hazards
+- **Deeper and Darker** — Sculk-infested deep realm
+- **Unique resources**: Living metals, soul-forged alloys, forgotten materials
+- Mobs are lethal, environmental damage, darkness mechanics
+- **L2 Hostility** scales mobs to extreme levels
+- **Gate requirement for Tier 5**: Harvest living metals, craft the final address key
+
+### Tier 5 — The Void / Custom Endgame
+**Difficulty:** Extreme | **Gate Status**: Requires all previous tech
+- Custom dimension (our mod) — or **RFTools Dimensions** for procedural endgame
+- **Bosses of Mass Destruction** encounters as final challenges
+- Unique endgame rewards: creative-flight items, ultimate weapons, cosmetic
+- "Win the pack" moment
+- Optionally: Stargate construction — learn to BUILD your own Stargates
 
 ---
 
-## Progression Gating Strategy
+## Address Discovery System
 
-The key challenge is **dimensional gating** — making sure players can't skip ahead. Options:
+This is a key custom mechanic we build. Here's how it works:
 
-### Option A: Item-locked Portals (Recommended)
-Each dimension's portal requires a specific item crafted from the *previous* dimension's unique resources. KubeJS handles this:
-- Tier 1 portal frame requires items only found in Overworld boss drops
-- Tier 2 portal requires Nether-exclusive alloys
-- etc.
+### Symbol Fragments
+- Found as rare loot in dungeon chests, structure loot, boss drops
+- Each fragment reveals one symbol on the dialing device
+- Higher-tier symbols only drop in higher-tier dimensions
+- **KubeJS** controls drop tables and loot injection
 
-### Option B: KubeJS Event Blocking
-Use KubeJS `player.tick` or dimension change events to block players from entering dimensions unless they have an advancement/item.
+### Address Assembly
+- Players collect 7 symbols per dimension address
+- The gate interface shows discovered vs undiscovered symbols
+- Wrong addresses = gate fails to connect (kawoosh and nothing)
+- **CC: Tweaked** can be used to brute-force test addresses (but costs energy!)
 
-### Option C: Custom Portal API
-Use **Custom Portal API Reforged** to define portals with custom activation items — cleanest integration.
+### Address Sources
+| Tier | How addresses are discovered |
+|------|------------------------------|
+| 1 | Complete symbol tablet found in Overworld ancient temple |
+| 2 | Symbol fragments drop from Tier 1 bosses + rare structure loot |
+| 3 | Requires combining materials from 2+ dimensions to craft a decoder |
+| 4 | Address fragments hidden in dimension-specific structures |
+| 5 | Address revealed only after completing a multi-dimension quest chain |
 
-### Recommended: Hybrid Approach
-- **Custom Portal API** for portal mechanics (what item activates, portal color, etc.)
-- **KubeJS** for recipe gating (portal activation items require previous tier resources)
-- **FTB Quests** for player guidance (questlines that walk through each tier)
+### Mining Dimensions (Parallel worlds)
+- Each tier has a "mining world" address — procedurally generated, resource-rich
+- **RFTools Dimensions** or custom KubeJS worldgen
+- Mining dimensions are hazardous but not boss-focused
+- Resources respawn/regenerate (chunk reset?) or are simply abundant
+- Separate from progression dimensions
+
+---
+
+## Tech Progression Stack
+
+### Power Generation Tiers
+| Stage | Power Source | Output | Mods |
+|-------|-------------|--------|------|
+| Early | Create kinetic → IE dynamo | Low | Create, IE |
+| Mid | IE diesel/biodiesel, Create additions | Medium | IE, Create Additions |
+| Mid-Late | Naquadah Generator | High | Stargate Journey |
+| Late | Mekanism fusion reactor | Very High | Mekanism |
+| Endgame | Zero Point Module | Extreme | Stargate Journey |
+
+### Processing Tiers
+| Stage | Processing | Mods |
+|-------|-----------|------|
+| Early | Create crushing, mixing, pressing | Create |
+| Mid | IE arc furnace, crusher | Immersive Engineering |
+| Mid-Late | Mekanism enrichment, injection, etc. | Mekanism |
+| Late | AE2 autocrafting, storage network | AE2 |
+| Endgame | Custom recipes (our mod) | Custom |
+
+### CC: Tweaked Progression
+| Stage | What you do with computers |
+|-------|---------------------------|
+| Early | Basic gate control — dial, disconnect, read status |
+| Mid | Automated dialing sequences, power monitoring |
+| Mid-Late | Stargate network logging, address database |
+| Late | Full automation — AE2 integration, auto-expedition systems |
+| Endgame | Custom programs that interact with all dimensions |
 
 ---
 
 ## Custom Mods We'll Need to Build
 
-### 1. **Dimensional Ascension** (working title)
-- Registers 1-2 completely custom dimensions with unique worldgen
-- Custom portal blocks with tier-specific activation
-- Integrates with the tiered ore/material system
-- Could include a "dimensional nexus" hub structure
+### 1. **Stargate Ascension** (core custom mod)
+- Symbol fragment system (items, loot injection)
+- Address discovery/decoding mechanics
+- Tier-gated dimension access (power requirements)
+- Mining dimension generation (tied to RFTools or standalone)
+- Custom worldgen structures containing address clues
+- Dimensional ore registration (new ores per tier)
+- Integration with Stargate Journey's API
 
-### 2. **Tiered Materials** (working title)
-- New ore types: Celestite (T2), Voidstone (T3), Abyssalite (T4), Eternium (T5)
-- Armor/tool sets per tier with increasing stats
-- Material processing recipes requiring previous-tier equipment
-- Integration with Create/Mekanism processing chains
+### 2. **Tiered Materials** (could be part of core mod)
+- New material system: Celestite (T2), Voidglass (T3), Abyssalite (T4), Eternium (T5)
+- Armor/tool sets with tier-appropriate stats
+- Processing chains integrated with Create/Mekanism
+- Material properties (radiation resistance, dimension-specific bonuses)
 
-### 3. **Dimensional Mobs** (if needed)
-- Custom mobs per dimension tier if existing mods don't cover it
-- Tier-specific boss encounters
-- Mob scaling linked to dimension
-
----
-
-## Open Questions / Needs Discussion
-- [ ] Exact number of tiers (5 is a lot — maybe 3-4 is better?)
-- [ ] Which dimensions are must-haves vs nice-to-have?
-- [ ] Guns: TaCZ vs Scorched Guns — which feels right?
-- [ ] Magic path: Ars Nouveau as parallel progression to tech?
-- [ ] Multiplayer vs single player focus?
-- [ ] How "hard" should the early game be? Hardcore lite or casual?
-- [ ] Do we want a custom starting dimension (underground spawn) like TownCraft?
-- [ ] Quest book style: guided linear quests or branching exploration?
+### 3. **Stargate Programs** (CC: Tweaked Lua programs pack)
+- Pre-written CC programs players can find/discover:
+  - Gate dialer with saved addresses
+  - Power monitor and auto-dialer
+  - Address brute-forcer (expensive!)
+  - Expedition logger
+  - Dimension scanner (shows ore types in connected world)
+- Found as loot items (floppy disks?) rather than given freely
 
 ---
 
-## Tech Stack Summary
-- **MC:** 1.21.1
-- **Loader:** NeoForge
-- **Cross-loader:** Sinytra Connector (for Fabric-only mods)
-- **Scripting:** KubeJS (recipes, gating, custom behaviors)
-- **Quests:** FTB Quests
-- **Custom Mods:** Java/NeoForge MDK
+## Supporting Mod List (Curated)
+
+### 🔧 Tech & Power
+| Mod | Purpose |
+|-----|---------|
+| Create (+ Create Crafts & Additions) | Early tech, kinetic power, FE bridge |
+| Immersive Engineering | Mid-tier tech, multiblocks, power |
+| Mekanism (+ Generators, Tools) | Late-game tech, advanced processing |
+| Applied Energistics 2 | Digital storage, autocrafting |
+| CC: Tweaked (+ Advanced Peripherals) | Computer control, Stargate programming |
+| XNet | Networking, logistics |
+| RFTools (Base, Power, Builder, Dimensions) | Mining worlds, power, building |
+
+### ⚔️ Combat & Mobs
+| Mod | Purpose |
+|-----|---------|
+| TaCZ (Timeless & Classics Zero) | Guns and firearms |
+| Immersive Aircraft | Early flight for exploration |
+| Mowzie's Mobs | Boss-quality animated mobs |
+| Bosses of Mass Destruction | Epic boss encounters |
+| Alex's Mobs | Creature diversity |
+| L2 Hostility | Mob difficulty scaling by area |
+
+### 🌍 Dimensions & Worldgen
+| Mod | Purpose |
+|-----|---------|
+| **Stargate Journey** | THE transportation system |
+| Terralith | Overworld biome overhaul |
+| Incendium | Nether overhaul |
+| Nullscape | End overhaul |
+| BetterEnd | End enhancement |
+| BetterNether | Nether enhancement |
+| Twilight Forest | Tier 2 progression dimension |
+| The Aether | Tier 3 sky dimension |
+| The Undergarden | Tier 4 hostile dimension |
+| Deeper and Darker | Tier 4 deep dimension |
+| Dimensional Doors | Bonus mystery dimensions |
+
+### 🔐 Progression & UI
+| Mod | Purpose |
+|-----|---------|
+| KubeJS | Custom recipes, gating, loot, events |
+| FTB Quests | Quest book / progression guide |
+| JEI | Recipe viewing |
+| Waystones | Intra-dimensional teleportation |
+
+### 🧰 Utilities & QoL
+| Mod | Purpose |
+|-----|---------|
+| Sophisticated Storage | Tiered storage |
+| Supplementaries | QoL blocks |
+| Curios / Accessories | Accessory slots |
+| Sinytra Connector | Fabric mod compatibility |
+
+---
+
+## Player Journey (Narrative Flow)
+
+1. **Awakening** — Spawn in the Overworld. Explore, survive. Find ancient ruins with strange symbols.
+2. **Discovery** — Find the Stargate. It's massive, inert, mysterious. A DHD sits nearby — dark, no power.
+3. **First Power** — Build basic tech (Create water wheels, IE wires). Connect power to the gate complex.
+4. **First Dial** — The DHD lights up. You found a complete address tablet. You dial. The kawoosh. Another world.
+5. **Abydos** — A desert world. Ancient structures. New resources. A boss guards deeper secrets.
+6. **The Address Book** — Defeating the boss gives symbol fragments. Piece by piece, you discover new addresses.
+7. **Tech Escalation** — Each dimension demands better gear, better power, better automation. Mekanism. AE2.
+8. **The Forest** — Twilight Forest. Dense, dark, bosses guard progress within the dimension itself.
+9. **The Sky** — Aether. End. Floating islands and alien landscapes. Advanced materials.
+10. **The Abyss** — Undergarden. Hostile, lethal. The rarest materials. Only the prepared survive.
+11. **The Void** — The final address. The ultimate challenge. Beat it, and you learn to build your own Stargates.
+12. **Mastery** — You are no longer exploring. You are building. Your own gates. Your own worlds. Your own journey.
+
+---
+
+## Open Questions
+- [ ] Stargate Journey's built-in dimensions — use them or override with our own?
+- [ ] Mining dimensions: RFTools Dimensions or custom KubeJS worldgen?
+- [ ] How many symbol fragments per address? (7 is Stargate canon)
+- [ ] Can players build Stargates in endgame or always find them?
+- [ ] Multiplayer considerations — shared gates, faction gates?
+- [ ] How hard should the Overworld early game be? (Before first gate activation)
+- [ ] Do we want a quest book (FTB Quests) or more discovery-based (no hand-holding)?
+- [ ] Sinytra Connector stability for Fabric-only mods on NeoForge?
+- [ ] Underground start like TownCraft, or normal surface start?
+- [ ] What's the pack name? (Stargate: Ascension is a placeholder)
