@@ -55,3 +55,7 @@ luanti/worlds/beta/mod_storage/
 luanti/proxy/auth/
 luanti/proxy/players.sqlite
 luanti/proxy/cache/
+
+# Dependencies (cloned, not tracked)
+luanti/engine/
+luanti/proxy/
