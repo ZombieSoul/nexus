@@ -164,12 +164,47 @@ core.register_entity("nexus:spacecraft", {
 })
 ```
 
-### 3.3 Ship Construction
+### 3.3 Ship Construction (Decided: Progressive Shipyard)
 
-Ships are built from components (a crafting/assembly system, future design). For the prototype:
-- A single "ship controller" block that, when placed and right-clicked, spawns a spacecraft entity
-- The ship type is determined by attached modules (hull, engine, fuel tank, cargo bay)
-- Ships are persistent (saved with the world via `get_staticdata`)
+**Decision:** Ships are built at a **shipyard structure** that constructs the spacecraft progressively as you feed it materials.
+
+**The shipyard is a multi-block structure** with a controller block that holds a formspec inventory. Players insert materials (hull plating, engine parts, fuel tank, control systems) and the ship visibly takes shape as requirements are met. This is a crafting-and-assembly experience, not an instant spawn.
+
+**How it works:**
+
+1. **Build the shipyard.** A 3×3 platform of shipyard blocks with a controller in the center. It has a build inventory visible via right-click formspec.
+2. **Insert materials in stages.** The formspec shows required components and current progress:
+   ```
+   ┌─ Shipyard: Scout Class ─────────────────┐
+   │ Hull Frame:    [████████████] 60/60  ✓  │
+   │ Hull Plating:  [██████░░░░░░] 24/40     │
+   │ Engine:        [✓] 1/1                ✓  │
+   │ Fuel Tank:     [✓] 1/1                ✓  │
+   │ Control Sys:   [░░░░░░░░░░░░] 0/12      │
+   │                                          │
+   │ Progress: 72%   [Launch when complete]   │
+   └──────────────────────────────────────────┘
+   ```
+3. **Visual progress.** As stages complete, the ship model assembles in-world above the shipyard (frame → plating → engine → complete). Players see their ship being built.
+4. **Launch.** When all requirements are met, the "Launch" button activates. The ship entity spawns, the player mounts, and they can fly.
+
+**Ship classes determine the material requirements:**
+
+| Class | Role | Materials (more) | Stats (rough) |
+|-------|------|-----------------|---------------|
+| Scout | Fast, fragile, cheap | Low | Low HP, low cargo, high speed |
+| Hauler | Slow, tough, big cargo | Medium | High HP, high cargo, low speed |
+| Fighter | Combat-focused | High | Medium HP, weapons, medium speed |
+
+**Why progressive construction instead of instant craft:**
+- It's a **milestone moment.** Building your first ship should feel like an achievement, not a button click.
+- It creates a **resource sink** that anchors the early game economy.
+- It's **visually rewarding** — you watch the ship come together.
+- It naturally gates progression: you can't rush to space until you've gathered and assembled.
+
+**Persistence:** The shipyard structure is a node with metadata (the build inventory). If a player walks away mid-build, progress is saved. Abandoned shipyards can be found by other players and completed/claimed (FFA ships — see §12).
+
+**Repair:** The same shipyard can repair a damaged ship. Dock the ship at the shipyard (fly into its pad), and the formspec shows damage; insert repair materials to restore hull integrity.
 
 ### 3.4 Ship State Format
 
@@ -365,12 +400,42 @@ nexus.ship.hyperspace_jump(player, "beta_orbit")
 1. Validate: ship has hyperspace drive + fuel for the jump
 2. Transfer to `hyperspace` zone (the transit server)
 3. Player flies through hyperspace (visual: starfield streaking, timer counts down)
-4. After travel time (or on reaching exit point), transfer to `destination_orbit`
-5. Arrive at destination orbit's entry point
+4. **Hyperspace events can occur** (see §5.5 — danger time, encounters)
+5. After travel time (or on reaching exit point), transfer to `destination_orbit`
+6. Arrive at destination orbit's entry point
 
 This is **two transfers** (orbit → hyperspace → orbit), but each uses the same mechanism. The hyperspace zone is a thin server — just stars, the ship, and a HUD. It exists to give travel a sense of duration and danger.
 
-### 5.4 The Generic Zone Transfer API
+### 5.5 Hyperspace Events (Built-In Danger Time)
+
+**Decision:** Hyperspace travel time is **not just a waiting period** — it has built-in danger time so that encounters and events can happen along the way. Travel isn't a loading screen; it's gameplay.
+
+**Travel duration:** Fixed minimum (so the danger window always exists), plus the player must fly to an exit point. Rough target: **30-60 seconds** of active travel for a standard jump, long enough for events but short enough to not be tedious.
+
+**The exit mechanic:** The player doesn't just wait for a timer. They must fly toward an exit beacon visible in the hyperspace tunnel. They can fly straight (boring, safe, faster) or take evasive action (slower, survives events). This gives the player agency over their own risk.
+
+**Event system:** During the flight, the hyperspace zone can spawn encounters based on a weighted event table. Events are throttled (not constant) so there's tension between calm and danger:
+
+| Event | Effect | Player Response |
+|-------|--------|----------------|
+| **Clear passage** | Nothing happens — reach exit safely | Fly straight |
+| **Turbulence** | Ship is buffeted, course deviates, minor damage | Steer against the drift |
+| **Energy surge** | Drains shields/fuel; bright flash | Ride it out or reroute |
+| **Debris field** | Asteroid-like obstacles in the tunnel | Dodge |
+| **Hyperspace creature** (future) | Something lives in hyperspace; attacks | Fight or flee |
+| **Signal anomaly** | Distress beacon, derelict ship, anomaly | Investigate (risk) or ignore |
+
+**Event scheduling (design):**
+- At least one event per jump (so hyperspace is never trivial), weighted toward low-severity
+- Higher-tier jumps (further galaxies) → more events, higher severity
+- Nav computer upgrade → earlier warning of upcoming events (HUD shows "turbulence ahead")
+- Events are **per-player-instance** in hyperspace (each traveler gets their own tunnel) — no cross-player interference in v1
+
+**Why danger time matters:** Without it, hyperspace is a loading screen. With it, hyperspace is the risk that makes gates valuable. A player whose ship is barely holding together should dread hyperspace; a player in a well-equipped ship should feel competent surviving it. That tension is the gameplay.
+
+**Failure in hyperspace:** If the ship is destroyed in hyperspace, the player is ejected into the destination orbit in a life pod (§8.2) — they survive but lose the ship. This prevents hyperspace from being a hard wall while keeping the consequences real.
+
+### 5.6 The Generic Zone Transfer API
 
 All three triggers call the same function:
 
@@ -621,20 +686,22 @@ Adds to the existing build order (base spec + gate protocol):
 
 ---
 
-## 12. Open Questions
+## 12. Design Decisions (Locked)
 
-1. **Ship building system?** How do players construct ships? Crafting recipe → entity spawn? Multi-block shipyard structure? This is a game design question for a separate doc. Prototype: place a "shipyard" block, craft a ship, right-click to spawn.
+All previously-open questions are now decided.
 
-2. **How many players per ship?** v1: one player per ship (pilot). v2: multi-crew (pilot + gunner + engineer). The entity attachment system supports multiple attachments, but the flight control model gets complex.
+1. **Ship building: PROGRESSIVE SHIPYARD (Decided).** Ships are built at a multi-block shipyard structure that constructs the spacecraft progressively as the player feeds it materials. Visual assembly, staged requirements, a milestone moment — not instant craft. See §3.3 for full detail.
 
-3. **Orbit server scope?** Is orbit a small zone (just the space above the planet, a few thousand blocks) or a full-size world? Recommend: small (the planet is "below," you can see it, but the playable orbit area is compact — say 2000×2000×400 blocks). Keeps it performant and focused.
+2. **Players per ship: ONE (v1).** One player per ship (pilot) for v1. The entity attachment system supports multi-crew later. Flight control model for multiple roles is complex and deferred.
 
-4. **Hyperspace travel time?** Instant (boring)? Fixed duration (e.g., 60 seconds)? Variable based on distance/fuel? Recommend: 30-120 seconds based on distance, with the option to upgrade the drive to reduce it. This makes hyperspace feel like travel, not a loading screen.
+3. **Orbit server scope: COMPACT, EXPANDABLE (Decided).** Orbit is a compact zone (roughly 2000×2000×400 blocks) — enough to be a real space arena, small enough to stay performant and focused. **The zone config is data-driven** so additional/larger zones can be added if players find space fun. Start simple, expand based on playtesting.
 
-5. **Can ships be stolen?** If a player leaves their ship in orbit, can another player take it? This is a PvP/griefing design question. Recommend: ships are owner-locked; only the owner (or someone with permission) can mount them. Wreckage (from destroyed ships) is free-for-all salvage.
+4. **Hyperspace travel time: BUILT-IN DANGER TIME (Decided).** Hyperspace is not a timer — it has active danger time with events and encounters along the way. Roughly 30-60 seconds of travel with a player-flown exit mechanic. See §5.5 for the full event system design.
 
-6. **What about NPCs/enemies in space?** Pirates, aliens, automated defenses? This is content design. The protocol supports entity transfer, so NPCs could exist in orbit/hyperspace. v1: no NPCs. v2: AI pirates in deep space.
+5. **Ship theft: FFA FOR NOW (Decided).** Ships are free-for-all in v1 — no ownership system. Anyone can mount an unattended ship. An ownership/permission system is a separate concern that can be layered on later (it's a general anti-griefing system that would also apply to chests, bases, etc.). For now, keep ships with you or accept the risk. **Wreckage (from destroyed ships) is always FFA salvage.**
 
-7. **Multiple planets per galaxy?** Could a galaxy have multiple surface zones (multiple planets you fly between in orbit)? The protocol supports it (each planet = a surface zone). v1: one planet per galaxy. v2: multiple planets with orbital travel between them.
+6. **NPCs in space: NONE in v1.** No pirates, aliens, or automated defenses in v1. The danger comes from environmental hazards (asteroids, radiation, hyperspace events) and PvP. NPCs are v2+ content design.
 
-8. **Docking stations?** Safe zones in orbit where players can build, trade, repair? This is base-building in space. The protocol supports it (it's just building blocks in the orbit world). v1: a single spawn station per orbit. v2: player-built stations.
+7. **Multiple planets per galaxy: ONE IN v1, API-READY (Decided).** Each galaxy has exactly one planet (one surface zone) in v1. **The zone topology API is designed to support multiple planets per galaxy** (each planet = a surface zone reachable via orbital flight). Adding planets is a config + content change, not an architecture change. The `nexus.zone` API and proxy config already treat zones generically.
+
+8. **Docking stations: ONE SPAWN STATION in v1.** Each orbit has a single safe spawn station where players arrive and can dock. Player-built orbital stations are v2 (it's just building blocks in the orbit world — the protocol supports it).
