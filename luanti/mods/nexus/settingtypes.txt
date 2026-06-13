@@ -1,0 +1,16 @@
+# Nexus configuration settings (set in minetest.conf per server)
+
+# Proxy HTTP API URL
+nexus.proxy_url (Proxy URL) string http://127.0.0.1:8080
+
+# This server's galaxy name
+nexus.galaxy_name (Galaxy Name) string alpha
+
+# HTTP timeout in seconds
+nexus.timeout (HTTP Timeout) float 10.0
+
+# This server's galaxy label (display name)
+nexus.galaxy_label (Galaxy Label) string Alpha Sector
+
+# This server's progression tier (1 = starting galaxy)
+nexus.galaxy_tier (Galaxy Tier) int 1

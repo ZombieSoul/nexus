@@ -24,3 +24,34 @@ crash-reports/
 # KubeJS cache
 kubejs/probe/
 kubejs/.cache/
+
+# Luanti build artifacts
+luanti/engine/bin/
+luanti/engine/CMakeCache.txt
+luanti/engine/CMakeFiles/
+luanti/engine/cmake_install.cmake
+luanti/engine/lib/
+luanti/engine/Makefile
+luanti/engine/*.cmake
+
+# Go build artifacts
+luanti/proxy/mt-multiserver-proxy
+luanti/nexus_plugin/nexus.so
+luanti/proxy/plugins/*.so
+
+# World data (generated at runtime)
+luanti/worlds/alpha/map_*.sqlite
+luanti/worlds/alpha/map_*.txt
+luanti/worlds/alpha/auth.txt
+luanti/worlds/alpha/players.sqlite
+luanti/worlds/alpha/mod_storage/
+luanti/worlds/beta/map_*.sqlite
+luanti/worlds/beta/map_*.txt
+luanti/worlds/beta/auth.txt
+luanti/worlds/beta/players.sqlite
+luanti/worlds/beta/mod_storage/
+
+# Proxy data
+luanti/proxy/auth/
+luanti/proxy/players.sqlite
+luanti/proxy/cache/

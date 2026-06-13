@@ -1,0 +1,393 @@
+// Package main is the nexus proxy plugin.
+//
+// nexus provides cross-server zone travel for Luanti games running behind
+// mt-multiserver-proxy. It exposes an HTTP API that Lua mods use to
+// transfer players (with inventory, meta, and extensible state) between
+// galaxy servers.
+//
+// The plugin runs inside the proxy process and uses the proxy's plugin API
+// (RegisterOnJoin, RegisterOnLeave, Find, ClientConn.Hop) to manage the
+// transfer lifecycle.
+package main
+
+import (
+	"encoding/json"
+	"log"
+	"net/http"
+	"os"
+	"sync"
+	"time"
+
+	proxy "github.com/HimbeerserverDE/mt-multiserver-proxy"
+)
+
+// config holds the nexus plugin configuration, loaded at startup.
+var config = Config{
+	APIPort:        "8080",
+	APIBind:        "127.0.0.1",
+	StorageBackend: "memory",
+	ArrivalTimeout: 30 * time.Second,
+	RestoreTimeout: 60 * time.Second,
+	StateTTL:       5 * time.Minute,
+}
+
+// subsystems — initialized in init()
+var (
+	stateStore  StateStore
+	transferMgr *TransferManager
+	galaxyReg   *GalaxyRegistry
+)
+
+func init() {
+	// Load config (env vars override defaults)
+	config.LoadFromEnv()
+
+	// Initialize subsystems
+	stateStore = NewMemoryStateStore(config.StateTTL)
+	transferMgr = NewTransferManager(stateStore, config)
+	galaxyReg = NewGalaxyRegistry()
+
+	// Register proxy lifecycle hooks
+	proxy.RegisterOnJoin(onClientJoin)
+	proxy.RegisterOnLeave(onClientLeave)
+
+	// Start HTTP API in a goroutine (must not block init)
+	go startHTTPServer()
+
+	log.Println("[nexus] plugin loaded — API on", config.APIBind+":"+config.APIPort)
+}
+
+// onClientJoin is called when a player connects to the proxy.
+// We don't do much here yet — the destination server's Lua mod
+// will call our HTTP API to retrieve state after the player hops.
+func onClientJoin(cc *proxy.ClientConn) string {
+	// Galaxy registration: the server this client just joined can
+	// register itself via HTTP. This is just informational.
+	return ""
+}
+
+// onClientLeave handles disconnects — cleans up any in-flight transfers.
+func onClientLeave(cc *proxy.ClientConn) {
+	name := cc.Name()
+	transferMgr.HandleDisconnect(name)
+}
+
+// startHTTPServer runs the Nexus REST API.
+func startHTTPServer() {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/nexus/health", handleHealth)
+	mux.HandleFunc("/nexus/depart", handleDepart)
+	mux.HandleFunc("/nexus/state/", handleState)
+	mux.HandleFunc("/nexus/galaxies", handleGalaxies)
+	mux.HandleFunc("/nexus/register", handleRegister)
+
+	addr := config.APIBind + ":" + config.APIPort
+	server := &http.Server{
+		Addr:         addr,
+		Handler:      mux,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+	}
+
+	if err := server.ListenAndServe(); err != nil {
+		log.Println("[nexus] HTTP server error:", err)
+	}
+}
+
+// --- HTTP Handlers ---
+
+// handleHealth responds to liveness checks.
+func handleHealth(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, map[string]any{
+		"ok":                 true,
+		"version":            "1.0",
+		"players_in_transit": transferMgr.ActiveCount(),
+		"galaxies":           galaxyReg.Count(),
+	})
+}
+
+// handleDepart is called by the origin server's Lua mod when a player
+// wants to travel. It stores the player's state and initiates the hop.
+//
+// POST /nexus/depart
+// Body: { "player": "alice", "destination": "beta", "state": {...} }
+func handleDepart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		writeError(w, 405, "METHOD_NOT_ALLOWED", "Use POST")
+		return
+	}
+
+	var req DepartRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "BAD_REQUEST", "Invalid JSON: "+err.Error())
+		return
+	}
+
+	if req.Player == "" || req.Destination == "" {
+		writeError(w, 400, "BAD_REQUEST", "Missing 'player' or 'destination'")
+		return
+	}
+
+	// Validate destination exists in proxy config
+	if _, ok := proxy.Conf().Servers[req.Destination]; !ok {
+		writeError(w, 404, "UNKNOWN_DESTINATION",
+			"No server named '"+req.Destination+"' in proxy config")
+		return
+	}
+
+	// Find the player's connection
+	cc := proxy.Find(req.Player)
+	if cc == nil {
+		writeError(w, 503, "NOT_CONNECTED",
+			"Player '"+req.Player+"' is not connected to the proxy")
+		return
+	}
+
+	// Check they're not already traveling
+	_, err := transferMgr.BeginTransfer(req.Player)
+	if err != nil {
+		writeError(w, 409, "IN_TRANSIT", err.Error())
+		return
+	}
+
+	// Store the player's state
+	if err := stateStore.Store(req.Player, &req.State); err != nil {
+		transferMgr.FailTransfer(req.Player)
+		writeError(w, 500, "STORE_FAILED", err.Error())
+		return
+	}
+
+	log.Printf("[nexus] depart: %s → %s (state stored, %d bytes)",
+		req.Player, req.Destination, len(req.State.Inventory))
+
+	// Initiate the hop asynchronously
+	go func() {
+		if err := cc.Hop(req.Destination); err != nil {
+			log.Printf("[nexus] hop failed for %s: %v", req.Player, err)
+			transferMgr.FailTransfer(req.Player)
+			stateStore.Delete(req.Player)
+			return
+		}
+		transferMgr.ConfirmHop(req.Player, req.Destination)
+		log.Printf("[nexus] hop confirmed: %s is now on %s", req.Player, req.Destination)
+	}()
+
+	writeJSON(w, 200, DepartResponse{
+		OK:        true,
+		RequestID: req.RequestID,
+		Message:   "Departure initiated",
+	})
+}
+
+// handleState handles GET (retrieve) and DELETE (confirm restore) for
+// player state. Called by the destination server.
+//
+// GET /nexus/state/alice       → returns stored state
+// DELETE /nexus/state/alice    → confirms restore, cleans up
+func handleState(w http.ResponseWriter, r *http.Request) {
+	// Extract player name from path: /nexus/state/<player>
+	playerName := r.URL.Path[len("/nexus/state/"):]
+	if playerName == "" {
+		writeError(w, 400, "BAD_REQUEST", "Missing player name in path")
+		return
+	}
+
+	switch r.Method {
+	case "GET":
+		state, ok := stateStore.Retrieve(playerName)
+		if !ok {
+			writeError(w, 404, "NO_STATE",
+				"No pending state for player '"+playerName+"'")
+			return
+		}
+		writeJSON(w, 200, map[string]any{
+			"ok":    true,
+			"state": state,
+		})
+
+	case "DELETE":
+		stateStore.Delete(playerName)
+		transferMgr.CompleteTransfer(playerName)
+		log.Printf("[nexus] state restored and cleared for %s", playerName)
+		writeJSON(w, 200, map[string]any{
+			"ok":      true,
+			"message": "State cleared",
+		})
+
+	default:
+		writeError(w, 405, "METHOD_NOT_ALLOWED", "Use GET or DELETE")
+	}
+}
+
+// handleGalaxies returns all known galaxies and their availability.
+//
+// GET /nexus/galaxies
+func handleGalaxies(w http.ResponseWriter, r *http.Request) {
+	galaxies := galaxyReg.All()
+	// Augment with server availability from proxy config
+	for _, g := range galaxies {
+		_, g.Available = proxy.Conf().Servers[g.Name]
+	}
+	writeJSON(w, 200, map[string]any{
+		"galaxies": galaxies,
+	})
+}
+
+// handleRegister lets galaxy servers register their metadata at startup.
+//
+// POST /nexus/register
+// Body: { "galaxy": { "name": "alpha", "label": "Alpha Sector", "tier": 1 } }
+func handleRegister(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		writeError(w, 405, "METHOD_NOT_ALLOWED", "Use POST")
+		return
+	}
+
+	var req struct {
+		Galaxy Galaxy `json:"galaxy"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "BAD_REQUEST", "Invalid JSON: "+err.Error())
+		return
+	}
+
+	galaxyReg.Register(&req.Galaxy)
+	log.Printf("[nexus] galaxy registered: %s (%s, tier %d)",
+		req.Galaxy.Name, req.Galaxy.Label, req.Galaxy.Tier)
+
+	writeJSON(w, 200, map[string]any{
+		"ok":      true,
+		"message": "Galaxy registered",
+	})
+}
+
+// --- Helpers ---
+
+func writeJSON(w http.ResponseWriter, status int, data any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(data)
+}
+
+func writeError(w http.ResponseWriter, status int, code, message string) {
+	writeJSON(w, status, map[string]any{
+		"ok":      false,
+		"error":   code,
+		"message": message,
+	})
+}
+
+// Config holds nexus plugin configuration.
+type Config struct {
+	APIPort        string
+	APIBind        string
+	StorageBackend string
+	ArrivalTimeout time.Duration
+	RestoreTimeout time.Duration
+	StateTTL       time.Duration
+}
+
+// LoadFromEnv reads configuration from environment variables.
+func (c *Config) LoadFromEnv() {
+	if v := os.Getenv("NEXUS_API_PORT"); v != "" {
+		c.APIPort = v
+	}
+	if v := os.Getenv("NEXUS_API_BIND"); v != "" {
+		c.APIBind = v
+	}
+}
+
+// DepartRequest is the body of POST /nexus/depart.
+type DepartRequest struct {
+	Player      string `json:"player"`
+	Destination string `json:"destination"`
+	RequestID   string `json:"request_id"`
+	State       PlayerState `json:"state"`
+}
+
+// DepartResponse is returned by POST /nexus/depart.
+type DepartResponse struct {
+	OK        bool   `json:"ok"`
+	RequestID string `json:"request_id"`
+	Message   string `json:"message"`
+}
+
+// PlayerState is the full state table that travels with a player.
+// This matches the state format in nexus-api-spec.md §4.
+type PlayerState struct {
+	Version     int    `json:"version"`
+	Format      string `json:"format"`
+	Player      string `json:"player"`
+	Origin      string `json:"origin"`
+	Destination string `json:"destination"`
+	Timestamp   int64  `json:"timestamp"`
+	RequestID   string `json:"request_id"`
+
+	// Core player attributes
+	Core struct {
+		HP     int `json:"hp"`
+		Breath int `json:"breath"`
+	} `json:"core"`
+
+	// Serialized inventory (opaque to the plugin — Lua handles structure)
+	Inventory json.RawMessage `json:"inventory"`
+
+	// Player metadata (key-value)
+	PlayerMeta map[string]string `json:"player_meta"`
+
+	// Custom extension state from registered handlers
+	Extensions map[string]json.RawMessage `json:"extensions"`
+
+	// Gate travel info (populated when traveling via gate)
+	GateTravel *GateTravelInfo `json:"gate_travel,omitempty"`
+}
+
+// GateTravelInfo tells the destination server where to place the player.
+type GateTravelInfo struct {
+	DepartureGate string `json:"departure_gate"`
+	ArrivalGate   string `json:"arrival_gate"`
+}
+
+// Galaxy represents a registered galaxy server.
+type Galaxy struct {
+	Name     string `json:"name"`
+	Label    string `json:"label"`
+	Tier     int    `json:"tier"`
+	Available bool  `json:"available"`
+}
+
+// --- Galaxy Registry ---
+
+// GalaxyRegistry tracks galaxy metadata registered by servers.
+type GalaxyRegistry struct {
+	mu      sync.RWMutex
+	galaxies map[string]*Galaxy
+}
+
+func NewGalaxyRegistry() *GalaxyRegistry {
+	return &GalaxyRegistry{
+		galaxies: make(map[string]*Galaxy),
+	}
+}
+
+func (g *GalaxyRegistry) Register(galaxy *Galaxy) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.galaxies[galaxy.Name] = galaxy
+}
+
+func (g *GalaxyRegistry) All() []*Galaxy {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	result := make([]*Galaxy, 0, len(g.galaxies))
+	for _, galaxy := range g.galaxies {
+		result = append(result, galaxy)
+	}
+	return result
+}
+
+func (g *GalaxyRegistry) Count() int {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return len(g.galaxies)
+}
