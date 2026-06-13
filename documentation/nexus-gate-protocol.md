@@ -628,7 +628,7 @@ Adds gate and item subsystems to the base spec's build order:
 
 3. **Item ownership and anti-dupe.** When an item is thrown through a gate, we track the owner. This is for logging and anti-exploit (e.g., preventing item dupe glitches). Should the destination item retain the original owner metadata? Yes — preserve item metadata fully.
 
-4. **Link directionality.** Stargate wormholes are one-way (you dial out, stuff comes through from your side, but you can't receive). Do we want bidirectional links (like MCU's space bridge) or one-way (classic Stargate)? This is a **game design decision**, not a technical one. The protocol supports both. Classic Stargate = one-way; bidirectional is more player-friendly. Recommend: bidirectional for gameplay, with one-way as an option for special gates.
+4. **Link directionality: BIDIRECTIONAL (Decided).** Gates are bidirectional. Both players and items can travel in either direction through an established link. Rationale: one-way links would require indicating to players whether a gate is currently transmitting or receiving — a whole additional UI/UX complexity that would frustrate players. Bidirectional is simpler to understand, more player-friendly, and matches our game format. (Classic Stargate is one-way, but our game is not classic Stargate — it's our own lore, TBD.) The protocol field `direction` remains in the data model for future special-case gates, but the default and only supported mode in v1 is `"bidirectional"`.
 
 5. **Gate obstruction.** What counts as "obstructed"? A block on the gate pad? A player standing on it? A mob? Needs a clear rule for the validation check. Recommend: any solid block or entity in the arrival zone = obstructed.
 
