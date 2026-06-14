@@ -24,6 +24,8 @@ local PROXY_URL = core.settings:get("nexus.proxy_url") or "http://127.0.0.1:8080
 local GALAXY_NAME = core.settings:get("nexus.galaxy_name") or "alpha"
 local GALAXY_LABEL = core.settings:get("nexus.galaxy_label") or GALAXY_NAME
 local GALAXY_TIER = tonumber(core.settings:get("nexus.galaxy_tier") or "1")
+local WORLD_NAME = core.settings:get("nexus.world_name") or GALAXY_NAME
+local ALLOW_SAME_WORLD = core.settings:get_bool("nexus.allow_same_world_travel", true)
 local HTTP_TIMEOUT = tonumber(core.settings:get("nexus.timeout") or "10")
 
 -- Shared API secret — must match the proxy plugin's NEXUS_API_SECRET.
@@ -53,6 +55,8 @@ nexus._config = {
     galaxy_name = GALAXY_NAME,
     galaxy_label = GALAXY_LABEL,
     galaxy_tier = GALAXY_TIER,
+    world_name = WORLD_NAME,
+    allow_same_world = ALLOW_SAME_WORLD,
     http_timeout = HTTP_TIMEOUT,
 }
 

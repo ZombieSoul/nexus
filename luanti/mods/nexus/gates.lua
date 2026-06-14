@@ -13,6 +13,48 @@ local cfg = nexus._config
 local PROXY = cfg.proxy_url
 local TIMEOUT = cfg.http_timeout
 local GALAXY = cfg.galaxy_name
+local WORLD = cfg.world_name or GALAXY
+local ALLOW_SAME_WORLD = cfg.allow_same_world ~= false
+
+-- =============================================================================
+-- Address Conversion Layer
+-- =============================================================================
+-- The ONLY place address strings are parsed or formatted.
+-- Internal routing always uses structured route tables:
+--   { galaxy = "milkyway", world = "earth", gate_id = "g10_20" }
+-- Changing the address format later means changing ONLY these two functions.
+-- Current format: "galaxy:world:gate_id" (e.g. "milkyway:earth:g10_20")
+
+--- Parse an address string into a structured route.
+--- @param addr string  e.g. "milkyway:earth:g10_20"
+--- @return table? route  {galaxy=, world=, gate_id=} or nil if invalid
+local function address_to_route(addr)
+    if not addr then return nil end
+    local galaxy, world, gate_id = addr:match("^([^:]+):([^:]+):([^:]+)$")
+    if not galaxy then return nil end
+    return { galaxy = galaxy, world = world, gate_id = gate_id }
+end
+
+--- Format a structured route into an address string.
+--- @param route table  {galaxy=, world=, gate_id=}
+--- @return string address
+local function route_to_address(route)
+    return route.galaxy .. ":" .. route.world .. ":" .. route.gate_id
+end
+
+--- Generate a unique gate_id from position (within this world).
+local function make_gate_id(pos)
+    return "g" .. math.abs(pos.x) .. "_" .. math.abs(pos.z)
+end
+
+--- Build the full route for a gate at the given position on this server.
+local function make_route(pos)
+    return {
+        galaxy = GALAXY,
+        world = WORLD,
+        gate_id = make_gate_id(pos),
+    }
+end
 
 -- Authenticated HTTP with Content-Type
 local function gate_http(opts, callback)
@@ -172,14 +214,20 @@ function nexus.gate.travel_player(player, gate_address)
         core.log("action", "[nexus] " .. pname .. " entering gate " ..
             gate_address .. " → " .. link.remote_address)
 
-        if link.remote_galaxy == GALAXY then
-            -- SAME GALAXY: instant local teleport, no hop needed.
-            -- The player stays on this server; we just move them to the
-            -- destination gate. No state capture, no loading screen.
+        -- Resolve the remote route from the address
+        local remote = address_to_route(link.remote_address)
+        local remote_world = (remote and remote.world) or link.remote_world
+
+        if remote_world == WORLD then
+            -- SAME WORLD: instant local teleport (if allowed)
+            -- Player stays on this server, just moves to the dest gate.
+            if not ALLOW_SAME_WORLD then
+                core.chat_send_player(pname, "[nexus] Same-world gate travel is disabled.")
+                return
+            end
             nexus.gate.get_info(link.remote_address, function(info)
                 if not info or not info.gate then
-                    core.chat_send_player(pname,
-                        "[nexus] Destination gate lost.")
+                    core.chat_send_player(pname, "[nexus] Destination gate lost.")
                     return
                 end
                 local g = info.gate
@@ -195,14 +243,15 @@ function nexus.gate.travel_player(player, gate_address)
                     player:set_look_horizontal(math.rad(g.facing))
                 end
                 player:set_velocity({x = 0, y = 0, z = 0})
-                -- Set arrival cooldown so they don't bounce back immediately
                 arrival_cooldown[pname] = (core.get_us_time() / 1000000) + 3.0
                 core.log("action", "[nexus] " .. pname ..
                     " teleported locally to " .. link.remote_address)
             end)
         else
-            -- CROSS GALAXY: full proxy hop + state sync pipeline
-            nexus.travel(player, link.remote_galaxy, {
+            -- CROSS WORLD: proxy hop + state sync (same galaxy = interstellar,
+            -- different galaxy = intergalactic — mechanism is the same,
+            -- power cost differentiation comes with the energy system)
+            nexus.travel(player, remote_world or link.remote_galaxy, {
                 arrival_gate = link.remote_address,
                 departure_gate = gate_address,
             })
@@ -330,8 +379,9 @@ local function register_gate_at(pos)
 
     nexus.gate.register({
         address = address,
-        label = GALAXY .. " Gate",
+        label = WORLD .. " Gate",
         galaxy = GALAXY,
+        world = WORLD,
         position = {x = center.x, y = center.y, z = center.z},
         arrival_offset = {x = 0, y = 0, z = -2},  -- 2 blocks in front of center
         facing = 0,

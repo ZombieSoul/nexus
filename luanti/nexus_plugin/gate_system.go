@@ -22,6 +22,7 @@ type Gate struct {
 	Address       string `json:"address"`
 	Label         string `json:"label"`
 	Galaxy        string `json:"galaxy"`
+	World         string `json:"world"`
 	Position      Vec3   `json:"position"`
 	ArrivalOffset Vec3   `json:"arrival_offset"`
 	Facing        int    `json:"facing"` // yaw in degrees
@@ -404,6 +405,7 @@ func handleLinkAddress(w http.ResponseWriter, r *http.Request) {
 		}
 		if partnerGate != nil {
 			resp["remote_galaxy"] = partnerGate.Galaxy
+			resp["remote_world"] = partnerGate.World
 			resp["remote_position"] = partnerGate.Position
 			resp["remote_arrival_offset"] = partnerGate.ArrivalOffset
 			resp["remote_facing"] = partnerGate.Facing
