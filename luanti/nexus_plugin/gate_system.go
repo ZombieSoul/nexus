@@ -63,11 +63,13 @@ type GateSystem struct {
 }
 
 func NewGateSystem() *GateSystem {
-	return &GateSystem{
+	gs := &GateSystem{
 		gates: make(map[string]*Gate),
 		links: make(map[string]*GateLink),
 		items: make(map[string][]QueuedItem),
 	}
+	go gs.cleanupLoop()
+	return gs
 }
 
 // --- Gate Registry ---
@@ -243,6 +245,60 @@ func (gs *GateSystem) FetchItems(gateAddress string) []QueuedItem {
 	items := gs.items[gateAddress]
 	delete(gs.items, gateAddress)
 	return items
+}
+
+// cleanupLoop periodically removes closed links and expired item queues
+// to prevent memory leaks from abandoned transfers and broken links.
+func (gs *GateSystem) cleanupLoop() {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		gs.mu.Lock()
+		now := time.Now().Unix()
+
+		// Remove closed links older than 5 minutes (keep briefly for queries)
+		for id, link := range gs.links {
+			if link.State == "closed" && now-link.OpenedAt > 300 {
+				delete(gs.links, id)
+			}
+			// Also remove links whose gates no longer exist
+			if link.State == "active" {
+				_, aExists := gs.gates[link.GateA]
+				_, bExists := gs.gates[link.GateB]
+				if !aExists || !bExists {
+					link.State = "closed"
+					log.Printf("[nexus] cleanup: breaking orphaned link %s <-> %s",
+						link.GateA, link.GateB)
+				}
+			}
+		}
+
+		// Remove item queues for gates that no longer exist, or items older than 5 min
+		for gate, items := range gs.items {
+			if _, exists := gs.gates[gate]; !exists {
+				if len(items) > 0 {
+					log.Printf("[nexus] cleanup: discarding %d orphaned items for removed gate %s",
+						len(items), gate)
+				}
+				delete(gs.items, gate)
+			} else {
+				// Filter out items older than 5 minutes
+				fresh := items[:0]
+				for _, item := range items {
+					if now-item.QueuedAt < 300 {
+						fresh = append(fresh, item)
+					}
+				}
+				if len(fresh) == 0 {
+					delete(gs.items, gate)
+				} else {
+					gs.items[gate] = fresh
+				}
+			}
+		}
+
+		gs.mu.Unlock()
+	}
 }
 
 // --- HTTP Handlers ---

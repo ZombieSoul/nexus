@@ -380,6 +380,23 @@ function nexus.travel(player, destination, opts)
             if resp and resp.ok then
                 core.log("action", "[nexus] departure confirmed for " .. pname ..
                     " — hop in progress")
+
+                -- Safety timeout: if the player is still on this server after
+                -- 15 seconds, the hop failed silently (proxy crash, dest down).
+                -- Unlock them so they're not stuck on the loading screen forever.
+                core.after(15, function()
+                    if departing[pname] then
+                        departing[pname] = nil
+                        local p = core.get_player_by_name(pname)
+                        if p then
+                            unlock_player(p)
+                            core.chat_send_player(pname,
+                                "[nexus] Transfer timed out — hop may have failed. Try again.")
+                            core.log("warning", "[nexus] departure timeout for " ..
+                                pname .. " — auto-unlocking")
+                        end
+                    end
+                end)
             else
                 departing[pname] = nil
                 unlock_player(player)  -- Remove lock on failure
@@ -442,6 +459,20 @@ core.register_on_joinplayer(function(player, last_login)
     -- it stays until restore completes. This ensures the player never sees a
     -- desynced inventory — everything happens behind the loading screen.
     lock_player(player, "Materializing in " .. GALAXY_LABEL .. "...")
+
+    -- Safety timeout: if the state check/restore takes too long (proxy down,
+    -- HTTP hung), unlock the player anyway so they're not stuck forever.
+    core.after(30, function()
+        if pending_arrival[pname] then
+            pending_arrival[pname] = nil
+            local p = core.get_player_by_name(pname)
+            if p then
+                unlock_player(p)
+                core.log("warning", "[nexus] arrival timeout for " .. pname ..
+                    " — auto-unlocking")
+            end
+        end
+    end)
 
     -- Give the hop a moment to settle, then check for pending state
     core.after(0.5, function()
