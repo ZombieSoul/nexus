@@ -39,6 +39,7 @@ var (
 	stateStore  StateStore
 	transferMgr *TransferManager
 	galaxyReg   *GalaxyRegistry
+	gateSys     *GateSystem
 )
 
 func init() {
@@ -49,6 +50,7 @@ func init() {
 	stateStore = NewMemoryStateStore(config.StateTTL)
 	transferMgr = NewTransferManager(stateStore, config)
 	galaxyReg = NewGalaxyRegistry()
+	gateSys = NewGateSystem()
 
 	// Register proxy lifecycle hooks
 	proxy.RegisterOnJoin(onClientJoin)
@@ -92,6 +94,11 @@ func startHTTPServer() {
 	mux.HandleFunc("/nexus/state/", requireAuth(handleState))
 	mux.HandleFunc("/nexus/galaxies", requireAuth(handleGalaxies))
 	mux.HandleFunc("/nexus/register", requireAuth(handleRegister))
+	// Gate system endpoints
+	mux.HandleFunc("/nexus/gate", requireAuth(handleGateRegister))
+	mux.HandleFunc("/nexus/gate/", requireAuth(handleGateAddress))
+	mux.HandleFunc("/nexus/link", requireAuth(handleLink))
+	mux.HandleFunc("/nexus/link/", requireAuth(handleLinkAddress))
 
 	addr := config.APIBind + ":" + config.APIPort
 	server := &http.Server{

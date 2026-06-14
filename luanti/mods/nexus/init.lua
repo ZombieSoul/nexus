@@ -16,7 +16,6 @@ nexus = {}
 -- Load submodules
 local modpath = core.get_modpath(core.get_current_modname())
 dofile(modpath .. "/serialize.lua")
-
 -- =============================================================================
 -- Configuration
 -- =============================================================================
@@ -46,6 +45,16 @@ local function nexus_http(opts, callback)
     table.insert(opts.extra_headers, "Authorization: Bearer " .. API_TOKEN)
     return http.fetch(opts, callback)
 end
+
+-- Expose internals needed by submodules (gates.lua, etc.)
+nexus._http = nexus_http
+nexus._config = {
+    proxy_url = PROXY_URL,
+    galaxy_name = GALAXY_NAME,
+    galaxy_label = GALAXY_LABEL,
+    galaxy_tier = GALAXY_TIER,
+    http_timeout = HTTP_TIMEOUT,
+}
 
 -- Track players who just arrived (anti-loop / restore-in-progress flag)
 local pending_arrival = {}
@@ -574,7 +583,7 @@ end
 
 -- Check if a player is currently being transferred.
 function nexus.is_in_transit(pname)
-    return pending_arrival[pname] ~= nil
+    return pending_arrival[pname] ~= nil or departing[pname] ~= nil
 end
 
 -- Placeholder for gate arrival positioning (implemented by gate system)
@@ -584,6 +593,12 @@ function nexus._handle_gate_arrival(player, arrival_gate)
     core.log("action", "[nexus] gate arrival at " .. arrival_gate ..
         " (positioning not yet implemented)")
 end
+
+-- =============================================================================
+-- Gate System (loaded last — needs nexus._http, nexus._config, nexus.travel)
+-- =============================================================================
+
+dofile(modpath .. "/gates.lua")
 
 -- =============================================================================
 -- Startup logging
