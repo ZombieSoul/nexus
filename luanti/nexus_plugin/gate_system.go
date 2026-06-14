@@ -42,19 +42,30 @@ type GateLink struct {
 	State     string `json:"state"`      // "active", "closed"
 }
 
+// QueuedItem is an item waiting to be fetched by the destination gate's server.
+type QueuedItem struct {
+	Item      map[string]any `json:"item"`
+	Velocity  Vec3           `json:"velocity"`
+	Owner     string         `json:"owner"`
+	EntryGate string         `json:"entry_gate"`
+	QueuedAt  int64          `json:"queued_at"`
+}
+
 // GateSystem manages the gate registry and link state.
 // It is the central authority — galaxy servers query it to validate
 // destinations and learn arrival positions.
 type GateSystem struct {
 	mu    sync.RWMutex
-	gates map[string]*Gate   // keyed by address
+	gates map[string]*Gate     // keyed by address
 	links map[string]*GateLink // keyed by link_id
+	items map[string][]QueuedItem // keyed by destination gate address
 }
 
 func NewGateSystem() *GateSystem {
 	return &GateSystem{
 		gates: make(map[string]*Gate),
 		links: make(map[string]*GateLink),
+		items: make(map[string][]QueuedItem),
 	}
 }
 
@@ -212,6 +223,25 @@ func (gs *GateSystem) breakLinksForGateLocked(gateAddress string) *GateLink {
 		}
 	}
 	return nil
+}
+
+// --- Item Queue ---
+
+// QueueItem adds an item to a destination gate's pending queue.
+func (gs *GateSystem) QueueItem(destGate string, item QueuedItem) {
+	gs.mu.Lock()
+	defer gs.mu.Unlock()
+	item.QueuedAt = time.Now().Unix()
+	gs.items[destGate] = append(gs.items[destGate], item)
+}
+
+// FetchItems returns all queued items for a gate and clears the queue.
+func (gs *GateSystem) FetchItems(gateAddress string) []QueuedItem {
+	gs.mu.Lock()
+	defer gs.mu.Unlock()
+	items := gs.items[gateAddress]
+	delete(gs.items, gateAddress)
+	return items
 }
 
 // --- HTTP Handlers ---
@@ -389,5 +419,62 @@ func handleLinkAddress(w http.ResponseWriter, r *http.Request) {
 
 	default:
 		writeError(w, 405, "METHOD_NOT_ALLOWED", "Use GET or DELETE")
+	}
+}
+
+// --- Item Transfer Handlers ---
+
+// handleItem handles POST /nexus/item (send an item through a link)
+func handleItem(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		writeError(w, 405, "METHOD_NOT_ALLOWED", "Use POST")
+		return
+	}
+	var req struct {
+		EntryGate       string         `json:"entry_gate"`
+		DestinationGate string         `json:"destination_gate"`
+		Item            map[string]any `json:"item"`
+		Velocity        Vec3           `json:"velocity"`
+		Owner           string         `json:"owner"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "BAD_REQUEST", "Invalid JSON: "+err.Error())
+		return
+	}
+	if req.DestinationGate == "" || req.Item == nil {
+		writeError(w, 400, "BAD_REQUEST", "Missing 'destination_gate' or 'item'")
+		return
+	}
+	qi := QueuedItem{
+		Item:      req.Item,
+		Velocity:  req.Velocity,
+		Owner:     req.Owner,
+		EntryGate: req.EntryGate,
+	}
+	gateSys.QueueItem(req.DestinationGate, qi)
+	log.Printf("[nexus] item queued: %s → %s (owner %s)",
+		req.EntryGate, req.DestinationGate, req.Owner)
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// handleItemAddress handles GET /nexus/item/<gate_address>
+func handleItemAddress(w http.ResponseWriter, r *http.Request) {
+	gateAddress := r.URL.Path[len("/nexus/item/"):]
+	if gateAddress == "" {
+		writeError(w, 400, "BAD_REQUEST", "Missing gate address in path")
+		return
+	}
+
+	switch r.Method {
+	case "GET":
+		items := gateSys.FetchItems(gateAddress)
+		writeJSON(w, 200, map[string]any{
+			"ok":    true,
+			"items": items,
+			"count": len(items),
+		})
+
+	default:
+		writeError(w, 405, "METHOD_NOT_ALLOWED", "Use GET")
 	}
 }

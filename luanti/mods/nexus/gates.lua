@@ -428,6 +428,156 @@ core.register_globalstep(function(dtime)
 end)
 
 -- =============================================================================
+-- Item Transfer Through Gates
+-- =============================================================================
+-- Dropped items entering a linked gate are captured, sent to the proxy,
+-- and recreated at the destination gate with transformed velocity.
+-- Items use data transfer (destroy+recreate), NOT connection hop.
+
+--- Serialize an ItemStack for transfer
+local function serialize_item(stack)
+    local entry = {
+        name = stack:get_name(),
+        count = stack:get_count(),
+        wear = stack:get_wear(),
+    }
+    local meta = stack:get_meta()
+    local fields = meta:to_table().fields
+    if next(fields) then
+        entry.meta = fields
+    end
+    return entry
+end
+
+--- Rotate a velocity vector by an angle (radians), keeping Y unchanged.
+local function transform_velocity(vel, angle)
+    local cos_a = math.cos(angle)
+    local sin_a = math.sin(angle)
+    return {
+        x = vel.x * cos_a - vel.z * sin_a,
+        y = vel.y,
+        z = vel.x * sin_a + vel.z * cos_a,
+    }
+end
+
+--- Send an item through a linked gate to the destination.
+function nexus.gate.send_item(gate_address, itemstack, velocity, owner)
+    -- Look up the link to find the destination
+    nexus.gate.get_link(gate_address, function(link)
+        if not link or not link.linked then return end
+
+        local item_data = serialize_item(itemstack)
+        local payload = core.write_json({
+            entry_gate = gate_address,
+            destination_gate = link.remote_address,
+            item = item_data,
+            velocity = velocity or {x = 0, y = 0, z = 0},
+            owner = owner or "",
+        })
+
+        gate_http({
+            url = PROXY .. "/nexus/item",
+            method = "POST",
+            data = payload,
+            timeout = TIMEOUT,
+        }, function(result)
+            if result.code ~= 200 then
+                core.log("warning", "[nexus] item send failed for " ..
+                    gate_address .. ": HTTP " .. result.code)
+            end
+        end)
+    end)
+end
+
+--- Fetch and recreate items arriving at a local gate.
+local function fetch_incoming_items(address, gate_data)
+    gate_http({
+        url = PROXY .. "/nexus/item/" .. address,
+        method = "GET",
+        timeout = TIMEOUT,
+    }, function(result)
+        if result.code ~= 200 then return end
+        local resp = core.parse_json(result.data)
+        if not resp or not resp.items or resp.count == 0 then return end
+
+        local pos = gate_data.pos
+        for _, qi in ipairs(resp.items) do
+            -- Reconstruct the ItemStack
+            local item_data = qi.item or {}
+            local stack = ItemStack({
+                name = item_data.name,
+                count = item_data.count,
+                wear = item_data.wear or 0,
+            })
+            -- Restore item metadata
+            if item_data.meta then
+                local meta = stack:get_meta()
+                for key, value in pairs(item_data.meta) do
+                    meta:set_string(key, value)
+                end
+            end
+
+            -- Calculate arrival position (gate pos + offset)
+            local arrival_pos = vector.add(pos, {x = 0, y = 1, z = 0})
+
+            -- Create the item entity
+            local obj = core.add_item(arrival_pos, stack)
+            if obj and qi.velocity then
+                -- Transform velocity: flip Z so item flies OUT of the gate
+                -- (opposite of the throw direction that went INTO the gate)
+                obj:set_velocity({
+                    x = qi.velocity.x or 0,
+                    y = qi.velocity.y or 2,
+                    z = -(qi.velocity.z or 0),
+                })
+            end
+
+            core.log("action", "[nexus] item arrived at " .. address ..
+                ": " .. (item_data.name or "?") ..
+                " x" .. (item_data.count or 1))
+        end
+    end)
+end
+
+-- Item sensor: detect dropped items entering linked gates (outgoing)
+local item_sensor_timer = 0
+core.register_globalstep(function(dtime)
+    item_sensor_timer = item_sensor_timer + dtime
+    if item_sensor_timer < 0.2 then return end  -- 5x/second
+    item_sensor_timer = 0
+
+    for address, gate_data in pairs(local_gates) do
+        if linked_gates[address] then
+            local objects = core.get_objects_inside_radius(gate_data.pos, 1.5)
+            for _, obj in ipairs(objects) do
+                local ent = obj:get_luaentity()
+                if ent and ent.name == "__builtin:item" and not ent._gate_sent then
+                    ent._gate_sent = true  -- prevent double-capture
+                    local stack = ItemStack(ent.itemstring)
+                    if not stack:is_empty() then
+                        local vel = obj:get_velocity()
+                        nexus.gate.send_item(address, stack, vel)
+                        obj:remove()  -- remove from origin
+                    end
+                end
+            end
+        end
+    end
+end)
+
+-- Incoming item poller: fetch items waiting at our gates
+local item_poll_timer = 0
+core.register_globalstep(function(dtime)
+    item_poll_timer = item_poll_timer + dtime
+    if item_poll_timer < 0.5 then return end  -- 2x/second
+    item_poll_timer = 0
+
+    for address, gate_data in pairs(local_gates) do
+        fetch_incoming_items(address, gate_data)
+    end
+end)
+
+-- =============================================================================
 -- Chat Commands (for testing / convenience)
 -- =============================================================================
 

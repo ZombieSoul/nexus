@@ -99,6 +99,9 @@ func startHTTPServer() {
 	mux.HandleFunc("/nexus/gate/", requireAuth(handleGateAddress))
 	mux.HandleFunc("/nexus/link", requireAuth(handleLink))
 	mux.HandleFunc("/nexus/link/", requireAuth(handleLinkAddress))
+	// Item transfer endpoints
+	mux.HandleFunc("/nexus/item", requireAuth(handleItem))
+	mux.HandleFunc("/nexus/item/", requireAuth(handleItemAddress))
 
 	addr := config.APIBind + ":" + config.APIPort
 	server := &http.Server{
