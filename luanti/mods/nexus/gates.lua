@@ -172,11 +172,41 @@ function nexus.gate.travel_player(player, gate_address)
         core.log("action", "[nexus] " .. pname .. " entering gate " ..
             gate_address .. " → " .. link.remote_address)
 
-        -- Use the core travel pipeline with gate info
-        nexus.travel(player, link.remote_galaxy, {
-            arrival_gate = link.remote_address,
-            departure_gate = gate_address,
-        })
+        if link.remote_galaxy == GALAXY then
+            -- SAME GALAXY: instant local teleport, no hop needed.
+            -- The player stays on this server; we just move them to the
+            -- destination gate. No state capture, no loading screen.
+            nexus.gate.get_info(link.remote_address, function(info)
+                if not info or not info.gate then
+                    core.chat_send_player(pname,
+                        "[nexus] Destination gate lost.")
+                    return
+                end
+                local g = info.gate
+                local pos = g.position or {}
+                local offset = g.arrival_offset or {x = 0, y = 1, z = 0}
+                local arrival_pos = {
+                    x = (pos.x or 0) + (offset.x or 0),
+                    y = (pos.y or 0) + (offset.y or 0),
+                    z = (pos.z or 0) + (offset.z or 0),
+                }
+                player:set_pos(arrival_pos)
+                if g.facing then
+                    player:set_look_horizontal(math.rad(g.facing))
+                end
+                player:set_velocity({x = 0, y = 0, z = 0})
+                -- Set arrival cooldown so they don't bounce back immediately
+                arrival_cooldown[pname] = (core.get_us_time() / 1000000) + 3.0
+                core.log("action", "[nexus] " .. pname ..
+                    " teleported locally to " .. link.remote_address)
+            end)
+        else
+            -- CROSS GALAXY: full proxy hop + state sync pipeline
+            nexus.travel(player, link.remote_galaxy, {
+                arrival_gate = link.remote_address,
+                departure_gate = gate_address,
+            })
+        end
     end)
 end
 
@@ -236,6 +266,52 @@ end
 -- When destroyed, it unregisters. Right-click shows the dial formspec.
 
 local GATE_NODE = "nexus:gate_base"
+local RING_NODE = "nexus:gate_ring"
+local HORIZON_NODE = "nexus:event_horizon"
+
+-- =============================================================================
+-- Gate Structure Geometry
+-- =============================================================================
+-- The gate is a 3-wide, 5-tall ring. The base block is the controller,
+-- placed at the bottom-center. Ring blocks form the frame. The portal
+-- opening is the center column (3 blocks tall). The event horizon fills
+-- the opening when linked.
+--
+-- Layout (relative to base block at origin, facing north / -Z):
+--
+--   Ring Ring Ring    y+4   top of ring
+--   Ring Air  Ring    y+3
+--   Ring Air  Ring    y+2   ← center (trigger zone, event horizon)
+--   Ring Air  Ring    y+1
+--   Ring Base Ring    y+0   bottom
+--
+-- Players/items arrive 2 blocks IN FRONT of center (z-2), clear of the
+-- 1.5-block trigger radius. This prevents the item re-capture loop.
+
+-- Ring block offsets relative to the base block (excluding base itself)
+local RING_OFFSETS = {
+    {-1, 0, 0}, {1, 0, 0},                       -- bottom row (left, right of base)
+    {-1, 1, 0}, {1, 1, 0},                       -- row 1
+    {-1, 2, 0}, {1, 2, 0},                       -- row 2
+    {-1, 3, 0}, {1, 3, 0},                       -- row 3
+    {-1, 4, 0}, {0, 4, 0}, {1, 4, 0},            -- top row
+}
+
+-- Portal opening offsets (where event horizon appears when linked)
+local PORTAL_OFFSETS = {
+    {0, 1, 0}, {0, 2, 0}, {0, 3, 0},
+}
+
+-- The center of the ring (trigger zone) is 2 blocks above the base
+local function get_center(base_pos)
+    return {x = base_pos.x, y = base_pos.y + 2, z = base_pos.z}
+end
+
+-- Arrival point: 2 blocks in front of center, clear of trigger radius
+local function get_arrival_pos(base_pos)
+    local c = get_center(base_pos)
+    return {x = c.x, y = c.y, z = c.z - 2}
+end
 
 local function register_gate_at(pos)
     local address = make_address(pos)
@@ -243,24 +319,54 @@ local function register_gate_at(pos)
     meta:set_string("address", address)
     meta:set_string("infotext", "Stargate: " .. address)
 
-    local_gates[address] = {pos = vector.new(pos)}
+    local center = get_center(pos)
+    local arrival = get_arrival_pos(pos)
+
+    local_gates[address] = {
+        pos = vector.new(pos),
+        center = vector.new(center),
+        arrival = vector.new(arrival),
+    }
 
     nexus.gate.register({
         address = address,
         label = GALAXY .. " Gate",
         galaxy = GALAXY,
-        position = {x = pos.x, y = pos.y, z = pos.z},
-        arrival_offset = {x = 0, y = 1, z = -2},  -- 2 blocks in front, 1 up
+        position = {x = center.x, y = center.y, z = center.z},
+        arrival_offset = {x = 0, y = 0, z = -2},  -- 2 blocks in front of center
         facing = 0,
         powered = true,
         obstructed = false,
     })
 end
 
+local function remove_event_horizon(base_pos)
+    for _, off in ipairs(PORTAL_OFFSETS) do
+        local p = {x = base_pos.x + off[1], y = base_pos.y + off[2], z = base_pos.z + off[3]}
+        local node = core.get_node(p)
+        if node.name == HORIZON_NODE then
+            core.remove_node(p)
+        end
+    end
+end
+
+local function place_event_horizon(base_pos)
+    for _, off in ipairs(PORTAL_OFFSETS) do
+        local p = {x = base_pos.x + off[1], y = base_pos.y + off[2], z = base_pos.z + off[3]}
+        local node = core.get_node(p)
+        if node.name == "air" then
+            core.set_node(p, {name = HORIZON_NODE})
+        end
+    end
+end
+
 local function unregister_gate_at(pos)
     local meta = core.get_meta(pos)
     local address = meta:get_string("address")
     if address == "" then return end
+
+    -- Remove event horizon
+    remove_event_horizon(pos)
 
     local_gates[address] = nil
     linked_gates[address] = nil
@@ -327,10 +433,65 @@ core.register_node(GATE_NODE, {
     on_rightclick = function(pos, node, player, itemstack, pointed_thing)
         show_gate_formspec(pos, player)
     end,
+})
 
-    -- Preserve metadata across rotations etc.
-    preserve_metadata = function(pos, oldnode, oldmeta, drops)
-        -- If mined (not destroyed), the gate is unregistered in on_destruct
+-- Ring frame blocks — form the stargate structure. Not obtainable normally.
+core.register_node(RING_NODE, {
+    description = "Stargate Ring Segment",
+    tiles = {"nexus_gate_ring.png"},
+    groups = {cracky = 3, not_in_creative_inventory = 1},
+    light_source = 4,
+    drop = "",  -- doesn't drop anything when broken
+
+    on_destruct = function(pos)
+        -- If a ring block is destroyed, find and destroy the whole gate
+        for addr, data in pairs(local_gates) do
+            local base_pos = data.pos
+            for _, off in ipairs(RING_OFFSETS) do
+                local rp = {x = base_pos.x + off[1], y = base_pos.y + off[2], z = base_pos.z + off[3]}
+                if vector.equals(rp, pos) then
+                    -- This ring block belongs to this gate — remove everything
+                    remove_event_horizon(base_pos)
+                    -- Remove all ring blocks
+                    for _, off2 in ipairs(RING_OFFSETS) do
+                        local p = {x = base_pos.x + off2[1], y = base_pos.y + off2[2], z = base_pos.z + off2[3]}
+                        local node = core.get_node(p)
+                        if node.name == RING_NODE then
+                            core.remove_node(p)
+                        end
+                    end
+                    -- Remove the base
+                    local bnode = core.get_node(base_pos)
+                    if bnode.name == GATE_NODE then
+                        core.remove_node(base_pos)
+                    end
+                    return
+                end
+            end
+        end
+    end,
+})
+
+-- Event horizon — the glowing portal surface. Non-solid, ephemeral.
+core.register_node(HORIZON_NODE, {
+    description = "Event Horizon",
+    tiles = {{
+        name = "nexus_event_horizon.png",
+        animation = {type = "vertical_frames", aspect_w = 16, aspect_h = 16, length = 3},
+    }},
+    drawtype = "glasslike",
+    paramtype = "light",
+    groups = {not_in_creative_inventory = 1, unbreakable = 1},
+    light_source = 12,
+    walkable = false,
+    pointable = false,
+    diggable = false,
+    drop = "",
+    post_effect_color = {a = 120, r = 30, g = 80, b = 200},  -- bluish tint when inside
+    -- Prevent placement by players — only the gate system places this
+    on_construct = function(pos)
+        -- If somehow placed manually, remove it
+        core.remove_node(pos)
     end,
 })
 
@@ -374,6 +535,7 @@ core.register_on_player_receive_fields(function(player, formname, fields)
         nexus.gate.establish_link(address, dest, pname, function(ok, info)
             if ok then
                 linked_gates[address] = true
+                place_event_horizon(pos)
                 core.chat_send_player(pname, "[nexus] Wormhole established!")
                 core.sound_play("nexus_gate_open", {
                     pos = pos, max_hear_distance = 30, gain = 0.8
@@ -390,6 +552,7 @@ core.register_on_player_receive_fields(function(player, formname, fields)
     elseif fields.close then
         nexus.gate.close_link(address, function(ok)
             linked_gates[address] = nil
+            remove_event_horizon(pos)
             if ok then
                 core.chat_send_player(pname, "[nexus] Wormhole closed.")
                 core.sound_play("nexus_gate_close", {
@@ -416,7 +579,7 @@ core.register_globalstep(function(dtime)
 
     for address, gate_data in pairs(local_gates) do
         if linked_gates[address] then
-            local pos = gate_data.pos
+            local pos = gate_data.center or gate_data.pos
             local objects = core.get_objects_inside_radius(pos, 1.5)
             for _, obj in ipairs(objects) do
                 if obj:is_player() then
@@ -500,7 +663,7 @@ local function fetch_incoming_items(address, gate_data)
         local resp = core.parse_json(result.data)
         if not resp or not resp.items or resp.count == 0 then return end
 
-        local pos = gate_data.pos
+        local pos = gate_data.arrival or gate_data.center or gate_data.pos
         for _, qi in ipairs(resp.items) do
             -- Reconstruct the ItemStack
             local item_data = qi.item or {}
@@ -517,18 +680,14 @@ local function fetch_incoming_items(address, gate_data)
                 end
             end
 
-            -- Calculate arrival position (gate pos + offset)
-            local arrival_pos = vector.add(pos, {x = 0, y = 1, z = 0})
-
-            -- Create the item entity
-            local obj = core.add_item(arrival_pos, stack)
-            if obj and qi.velocity then
-                -- Transform velocity: flip Z so item flies OUT of the gate
-                -- (opposite of the throw direction that went INTO the gate)
+            -- Create the item at the arrival point (in front of gate, clear of trigger zone)
+            local obj = core.add_item(pos, stack)
+            if obj then
+                -- Give it outward velocity so it flies away from the gate
                 obj:set_velocity({
-                    x = qi.velocity.x or 0,
-                    y = qi.velocity.y or 2,
-                    z = -(qi.velocity.z or 0),
+                    x = qi.velocity and qi.velocity.x or 0,
+                    y = qi.velocity and qi.velocity.y or 3,
+                    z = qi.velocity and -(qi.velocity.z) or -3,
                 })
             end
 
@@ -548,7 +707,8 @@ core.register_globalstep(function(dtime)
 
     for address, gate_data in pairs(local_gates) do
         if linked_gates[address] then
-            local objects = core.get_objects_inside_radius(gate_data.pos, 1.5)
+            local pos = gate_data.center or gate_data.pos
+            local objects = core.get_objects_inside_radius(pos, 1.5)
             for _, obj in ipairs(objects) do
                 local ent = obj:get_luaentity()
                 if ent and ent.name == "__builtin:item" and not ent._gate_sent then
@@ -580,6 +740,54 @@ end)
 -- =============================================================================
 -- Chat Commands (for testing / convenience)
 -- =============================================================================
+
+-- /placegate — auto-build a complete stargate at the player's position
+-- Places a base block and all ring blocks. For quick testing.
+core.register_chatcommand("placegate", {
+    params = "",
+    description = "Build a complete stargate at your position",
+    privs = {give = true},
+    func = function(name)
+        local player = core.get_player_by_name(name)
+        if not player then return false end
+
+        local pos = vector.round(player:get_pos())
+        pos.y = math.floor(pos.y)
+
+        -- Check area is clear
+        local blocked = false
+        for _, off in ipairs(RING_OFFSETS) do
+            local p = {x = pos.x + off[1], y = pos.y + off[2], z = pos.z + off[3]}
+            if core.get_node(p).name ~= "air" then
+                blocked = true
+                break
+            end
+        end
+        for _, off in ipairs(PORTAL_OFFSETS) do
+            local p = {x = pos.x + off[1], y = pos.y + off[2], z = pos.z + off[3]}
+            if core.get_node(p).name ~= "air" then
+                blocked = true
+                break
+            end
+        end
+
+        if blocked then
+            return false, "Area not clear — need a 3x5 open space"
+        end
+
+        -- Place ring blocks
+        for _, off in ipairs(RING_OFFSETS) do
+            local p = {x = pos.x + off[1], y = pos.y + off[2], z = pos.z + off[3]}
+            core.set_node(p, {name = RING_NODE})
+        end
+
+        -- Place base block (triggers on_construct → registration)
+        core.set_node(pos, {name = GATE_NODE})
+
+        local address = core.get_meta(pos):get_string("address")
+        return true, "Stargate built: " .. address
+    end,
+})
 
 -- /dial <address> — dial from the nearest gate
 core.register_chatcommand("dial", {
@@ -621,13 +829,15 @@ core.register_chatcommand("dial", {
         nexus.gate.establish_link(nearest_addr, dest, name, function(ok, info)
             if ok then
                 linked_gates[nearest_addr] = true
-                core.chat_send_player(name, "[nexus] Wormhole established! Walk into the gate to travel.")
                 local gate_data = local_gates[nearest_addr]
                 if gate_data then
+                    place_event_horizon(gate_data.pos)
                     core.sound_play("nexus_gate_open", {
-                        pos = gate_data.pos, max_hear_distance = 30, gain = 0.8
+                        pos = gate_data.center or gate_data.pos,
+                        max_hear_distance = 30, gain = 0.8
                     })
                 end
+                core.chat_send_player(name, "[nexus] Wormhole established! Walk into the gate to travel.")
             else
                 core.chat_send_player(name, "[nexus] Dialing failed: " ..
                     tostring(info))
@@ -667,8 +877,10 @@ core.register_chatcommand("closegate", {
             core.chat_send_player(name, "[nexus] Wormhole closed.")
             local gate_data = local_gates[nearest_addr]
             if gate_data then
+                remove_event_horizon(gate_data.pos)
                 core.sound_play("nexus_gate_close", {
-                    pos = gate_data.pos, max_hear_distance = 30, gain = 0.8
+                    pos = gate_data.center or gate_data.pos,
+                    max_hear_distance = 30, gain = 0.8
                 })
             end
         end)
@@ -702,20 +914,32 @@ core.register_chatcommand("gates", {
 
 -- Periodically poll the proxy for link state to catch links established
 -- from the other direction (incoming wormholes).
+-- Also places/removes the event horizon visual when link state changes.
 local refresh_timer = 0
 core.register_globalstep(function(dtime)
     refresh_timer = refresh_timer + dtime
     if refresh_timer < 2.0 then return end  -- every 2 seconds
     refresh_timer = 0
 
-    for address, _ in pairs(local_gates) do
+    for address, gate_data in pairs(local_gates) do
         nexus.gate.get_link(address, function(link)
-            if link and link.linked then
+            local is_linked = link and link.linked
+            local was_linked = linked_gates[address] ~= nil
+
+            if is_linked and not was_linked then
+                -- Link just appeared — place event horizon
                 linked_gates[address] = true
-            else
-                -- Only clear if we didn't establish it locally
-                -- (our own outgoing link might show as linked too)
-                linked_gates[address] = linked_gates[address] or nil
+                place_event_horizon(gate_data.pos)
+                core.sound_play("nexus_gate_open", {
+                    pos = gate_data.center, max_hear_distance = 30, gain = 0.6
+                })
+            elseif not is_linked and was_linked then
+                -- Link just disappeared — remove event horizon
+                linked_gates[address] = nil
+                remove_event_horizon(gate_data.pos)
+                core.sound_play("nexus_gate_close", {
+                    pos = gate_data.center, max_hear_distance = 30, gain = 0.6
+                })
             end
         end)
     end
