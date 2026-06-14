@@ -11,10 +11,12 @@
 package main
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,6 +27,7 @@ import (
 var config = Config{
 	APIPort:        "8080",
 	APIBind:        "127.0.0.1",
+	APISecret:      "", // must be set via NEXUS_API_SECRET; handlers fail closed if empty
 	StorageBackend: "memory",
 	ArrivalTimeout: 30 * time.Second,
 	RestoreTimeout: 60 * time.Second,
@@ -54,7 +57,16 @@ func init() {
 	// Start HTTP API in a goroutine (must not block init)
 	go startHTTPServer()
 
-	log.Println("[nexus] plugin loaded — API on", config.APIBind+":"+config.APIPort)
+	log.Println("[nexus] plugin loaded — API on", config.APIBind+":"+config.APIPort,
+		"— auth:", authStatus())
+}
+
+// authStatus returns a human-readable indicator of whether API auth is armed.
+func authStatus() string {
+	if config.APISecret != "" {
+		return "ENABLED (bearer token required)"
+	}
+	return "DISABLED (no NEXUS_API_SECRET set — fail-closed)"
 }
 
 // onClientJoin is called when a player connects to the proxy.
@@ -76,10 +88,10 @@ func onClientLeave(cc *proxy.ClientConn) {
 func startHTTPServer() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/nexus/health", handleHealth)
-	mux.HandleFunc("/nexus/depart", handleDepart)
-	mux.HandleFunc("/nexus/state/", handleState)
-	mux.HandleFunc("/nexus/galaxies", handleGalaxies)
-	mux.HandleFunc("/nexus/register", handleRegister)
+	mux.HandleFunc("/nexus/depart", requireAuth(handleDepart))
+	mux.HandleFunc("/nexus/state/", requireAuth(handleState))
+	mux.HandleFunc("/nexus/galaxies", requireAuth(handleGalaxies))
+	mux.HandleFunc("/nexus/register", requireAuth(handleRegister))
 
 	addr := config.APIBind + ":" + config.APIPort
 	server := &http.Server{
@@ -91,6 +103,34 @@ func startHTTPServer() {
 
 	if err := server.ListenAndServe(); err != nil {
 		log.Println("[nexus] HTTP server error:", err)
+	}
+}
+
+// requireAuth wraps a handler, requiring a valid Bearer token matching the
+// configured APISecret. The token is the shared secret trusted by all galaxy
+// servers — it proves the caller is a trusted server, not an arbitrary process.
+// Uses constant-time comparison to avoid timing side channels.
+// If APISecret is unset, the handler fails closed (403) for safety.
+func requireAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if config.APISecret == "" {
+			writeError(w, 403, "AUTH_NOT_CONFIGURED",
+				"API secret not set on proxy — refusing to serve")
+			return
+		}
+		auth := r.Header.Get("Authorization")
+		const prefix = "Bearer "
+		if !strings.HasPrefix(auth, prefix) {
+			writeError(w, 401, "UNAUTHORIZED",
+				"Missing Authorization: Bearer <token> header")
+			return
+		}
+		token := auth[len(prefix):]
+		if subtle.ConstantTimeCompare([]byte(token), []byte(config.APISecret)) != 1 {
+			writeError(w, 403, "FORBIDDEN", "Invalid API token")
+			return
+		}
+		next(w, r)
 	}
 }
 
@@ -281,6 +321,7 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 type Config struct {
 	APIPort        string
 	APIBind        string
+	APISecret      string // shared bearer token trusted by all galaxy servers
 	StorageBackend string
 	ArrivalTimeout time.Duration
 	RestoreTimeout time.Duration
@@ -295,6 +336,7 @@ func (c *Config) LoadFromEnv() {
 	if v := os.Getenv("NEXUS_API_BIND"); v != "" {
 		c.APIBind = v
 	}
+	c.APISecret = os.Getenv("NEXUS_API_SECRET")
 }
 
 // DepartRequest is the body of POST /nexus/depart.

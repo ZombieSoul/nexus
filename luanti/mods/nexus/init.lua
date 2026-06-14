@@ -27,6 +27,11 @@ local GALAXY_LABEL = core.settings:get("nexus.galaxy_label") or GALAXY_NAME
 local GALAXY_TIER = tonumber(core.settings:get("nexus.galaxy_tier") or "1")
 local HTTP_TIMEOUT = tonumber(core.settings:get("nexus.timeout") or "10")
 
+-- Shared API secret — must match the proxy plugin's NEXUS_API_SECRET.
+-- Sent as a Bearer token on every request so the proxy can verify we're
+-- a trusted galaxy server, not an arbitrary caller.
+local API_TOKEN = core.settings:get("nexus.api_secret") or ""
+
 -- HTTP API handle (requires secure.http_mods = nexus in minetest.conf)
 local http = core.request_http_api()
 if not http then
@@ -34,8 +39,124 @@ if not http then
         "Add 'secure.http_mods = nexus' to minetest.conf")
 end
 
+-- Authenticated HTTP request — injects the shared API secret into every
+-- request so the proxy plugin can verify the caller is a trusted galaxy server.
+local function nexus_http(opts, callback)
+    opts.extra_headers = opts.extra_headers or {}
+    table.insert(opts.extra_headers, "Authorization: Bearer " .. API_TOKEN)
+    return http.fetch(opts, callback)
+end
+
 -- Track players who just arrived (anti-loop / restore-in-progress flag)
 local pending_arrival = {}
+
+-- Track players whose departure is in progress (inventory frozen to prevent dupes)
+local departing = {}
+
+-- =============================================================================
+-- Anti-Cheat: Inventory Freeze During Transfer
+-- =============================================================================
+-- When a player triggers travel, their inventory is captured server-side and
+-- sent to the proxy. But the hop is async — there's a window between capture
+-- and the actual server switch. During that window, a player could drop items
+-- into the world, then arrive on the destination with the captured copy —
+-- duplicating items.
+--
+-- To prevent this, we freeze ALL inventory interactions the instant departure
+-- begins. The freeze is lifted if the transfer fails (player keeps their
+-- items) or naturally cleared when the player leaves on a successful hop.
+--
+-- Uses core.register_allow_player_inventory_action — a built-in engine
+-- callback available in ALL Luanti games (not devtest-specific).
+
+-- The freeze covers BOTH sides of a transfer:
+--   departing[pname]  — set during capture until hop/failure (prevents dropping
+--                        items on the origin after they've been captured)
+--   pending_arrival[pname] — set on join until restore completes (prevents
+--                        dropping the destination's saved inventory before
+--                        the nexus restore overwrites it)
+core.register_allow_player_inventory_action(function(player, action, inventory, info)
+	local pname = player:get_player_name()
+	if departing[pname] or pending_arrival[pname] then
+		local phase = departing[pname] and "departure" or "arrival"
+		core.log("action", "[nexus] BLOCKED " .. action .. " action for " .. pname .. " (" .. phase .. " freeze)")
+		return 0  -- Block all moves, puts, takes, drops, and crafts
+	end
+end)
+
+-- =============================================================================
+-- Travel Lock: Loading Screen + Player Freeze
+-- =============================================================================
+-- During transfer, the player is fully locked: a fullscreen loading screen
+-- blocks all interaction, physics are frozen (no walking), and inventory is
+-- frozen (no drops/moves). This eliminates ALL race conditions — the player
+-- never has control during the vulnerable capture→restore window.
+--
+-- The loading screen also fixes client-side inventory desync: since the player
+-- can't send inventory actions during the window, there are no rejected
+-- predictions to confuse the hotbar rendering. When the screen clears,
+-- the client shows a clean, server-authoritative inventory.
+
+local saved_physics = {}
+
+-- Show a fullscreen loading screen during wormhole travel.
+local function show_travel_screen(pname, message)
+	local formspec = table.concat({
+		"formspec_version[4]",
+		"size[12,7]",
+		"position[0.5,0.46]",
+		"anchor[0.5,0.5]",
+		"no_prepend[]",
+		"bgcolor[#0A0A2A;false]",  -- dark void / wormhole backdrop
+		"hypertext[1,2.5;10,2.5;msg;<global halign=center><style color=#FFFFFF size=24>" ..
+			core.formspec_escape(message) ..
+			"</style><br><br><style color=#888888 size=16>Stand by for materialization...</style>]",
+	})
+	core.show_formspec(pname, "nexus:travel", formspec)
+end
+
+local function close_travel_screen(pname)
+	core.show_formspec(pname, "nexus:travel", "")
+end
+
+-- Fully lock a player: freeze movement, show loading screen.
+-- Call this at the start of departure AND on arrival.
+local function lock_player(player, message)
+	local pname = player:get_player_name()
+	-- Save current physics before overriding (games may set custom values)
+	saved_physics[pname] = player:get_physics_override()
+	player:set_physics_override({
+		speed = 0,
+		jump = 0,
+		gravity = 0,
+	})
+	show_travel_screen(pname, message)
+end
+
+-- Unlock a player: restore physics, remove loading screen.
+local function unlock_player(player)
+	local pname = player:get_player_name()
+	local saved = saved_physics[pname]
+	if saved then
+		player:set_physics_override(saved)
+		saved_physics[pname] = nil
+	else
+		player:set_physics_override({ speed = 1, jump = 1, gravity = 1 })
+	end
+	close_travel_screen(pname)
+end
+
+-- Prevent the player from closing the travel screen with ESC during transfer.
+-- If they try, immediately re-show it.
+core.register_on_player_receive_fields(function(player, formname, fields)
+	if formname == "nexus:travel" and fields.quit then
+		local pname = player:get_player_name()
+		if departing[pname] or pending_arrival[pname] then
+			show_travel_screen(pname, "Transfer in progress...")
+			return true  -- suppress further processing
+		end
+	end
+end)
 
 -- =============================================================================
 -- State Handler Registry
@@ -112,7 +233,7 @@ function nexus.state.restore(player, state)
         nexus.serialize.restore_player_meta(player, state.player_meta)
     end
 
-    -- Extension state
+    -- Extension state (guard against nil from JSON null)
     if state.extensions then
         for name, data in pairs(state.extensions) do
             local handler = nexus.state._handlers[name]
@@ -185,6 +306,13 @@ function nexus.travel(player, destination, opts)
 
     local pname = player:get_player_name()
 
+    -- Prevent double-departure: if the player is already mid-transfer, refuse.
+    -- Without this, a second failed departure would clear the freeze flag
+    -- from the first in-progress transfer.
+    if departing[pname] then
+        return false, "Transfer already in progress"
+    end
+
     if not http then
         return false, "HTTP API not available (check secure.http_mods)"
     end
@@ -196,6 +324,12 @@ function nexus.travel(player, destination, opts)
             return false, "Travel cancelled by callback"
         end
     end
+
+    -- Freeze inventory to prevent duplication during the async transfer window.
+    -- This blocks drops, moves, and chest deposits between capture and hop.
+    -- Also show the loading screen + freeze movement — full lock.
+    departing[pname] = true
+    lock_player(player, "Entering wormhole to " .. destination .. "...")
 
     -- Capture state
     core.log("action", "[nexus] capturing state for " .. pname .. " → " .. destination)
@@ -221,7 +355,7 @@ function nexus.travel(player, destination, opts)
     core.log("action", "[nexus] sending departure request for " .. pname ..
         " (" .. #payload .. " bytes)")
 
-    http.fetch({
+    nexus_http({
         url = PROXY_URL .. "/nexus/depart",
         method = "POST",
         data = payload,
@@ -234,12 +368,16 @@ function nexus.travel(player, destination, opts)
                 core.log("action", "[nexus] departure confirmed for " .. pname ..
                     " — hop in progress")
             else
+                departing[pname] = nil
+                unlock_player(player)  -- Remove lock on failure
                 local msg = (resp and resp.message) or "Unknown response"
                 core.log("error", "[nexus] departure failed for " .. pname .. ": " .. msg)
                 core.chat_send_player(pname, "Travel failed: " .. msg)
                 fire_callbacks("on_travel_failed", player, msg, "depart")
             end
         else
+            departing[pname] = nil
+            unlock_player(player)  -- Remove lock on failure
             local msg = "Proxy returned HTTP " .. result.code
             core.log("error", "[nexus] departure HTTP error for " .. pname .. ": " .. msg)
             core.chat_send_player(pname, "Travel failed: " .. msg)
@@ -249,6 +387,21 @@ function nexus.travel(player, destination, opts)
 
     return true
 end
+
+-- =============================================================================
+-- Cleanup: Clear transfer state when a player leaves
+-- =============================================================================
+
+-- When a player leaves (either by hopping to another server or by disconnecting),
+-- clear their departure and arrival tracking. On a successful hop, the departing
+-- flag doesn't need clearing (the player is gone), but we clear it anyway for
+-- safety — if the same player reconnects, we don't want a stale freeze.
+core.register_on_leaveplayer(function(player)
+    local pname = player:get_player_name()
+    departing[pname] = nil
+    pending_arrival[pname] = nil
+    saved_physics[pname] = nil
+end)
 
 -- =============================================================================
 -- Arrival Handler
@@ -262,23 +415,42 @@ core.register_on_joinplayer(function(player, last_login)
     if not http then return end
     if pending_arrival[pname] then return end -- already processing
 
+    -- Freeze inventory immediately — we don't yet know if this is a transfer
+    -- arrival or a normal login. There's a window between join and the nexus
+    -- state restore (0.5s + HTTP roundtrip) during which the destination's
+    -- saved inventory is loaded. Without freezing, a player could drop those
+    -- items, then the restore overwrites the inventory with the captured copy —
+    -- duplicating items. The freeze is lifted once state is checked/restored.
+    pending_arrival[pname] = true
+
+    -- Fully lock the player: loading screen + frozen movement + inventory freeze.
+    -- This runs BEFORE we even know if there's pending state. For normal logins,
+    -- the lock is removed as soon as the GET returns 404 (~0.5s). For transfers,
+    -- it stays until restore completes. This ensures the player never sees a
+    -- desynced inventory — everything happens behind the loading screen.
+    lock_player(player, "Materializing in " .. GALAXY_LABEL .. "...")
+
     -- Give the hop a moment to settle, then check for pending state
     core.after(0.5, function()
         if not core.get_player_by_name(pname) then return end -- player left already
 
-        http.fetch({
+        nexus_http({
             url = PROXY_URL .. "/nexus/state/" .. pname,
             method = "GET",
             timeout = HTTP_TIMEOUT,
         }, function(result)
             if result.code ~= 200 then
                 -- No pending state — this is a normal login, not a transfer
+                pending_arrival[pname] = nil
+                unlock_player(player)  -- Remove lock for normal login
                 return
             end
 
             local resp = core.parse_json(result.data)
             if not resp or not resp.ok or not resp.state then
                 core.log("warning", "[nexus] arrival state malformed for " .. pname)
+                pending_arrival[pname] = nil
+                unlock_player(player)  -- Remove lock on malformed state
                 return
             end
 
@@ -288,6 +460,8 @@ core.register_on_joinplayer(function(player, last_login)
 
             -- Restore the player's state
             nexus.state.restore(player, state)
+            pending_arrival[pname] = nil
+            unlock_player(player)  -- Restore complete — remove lock + loading screen
 
             -- Handle gate arrival positioning
             if state.gate_travel and state.gate_travel.arrival_gate then
@@ -295,7 +469,7 @@ core.register_on_joinplayer(function(player, last_login)
             end
 
             -- Confirm restore — delete state from proxy
-            http.fetch({
+            nexus_http({
                 url = PROXY_URL .. "/nexus/state/" .. pname,
                 method = "DELETE",
                 timeout = HTTP_TIMEOUT,
@@ -334,7 +508,7 @@ core.register_on_mods_loaded(function()
 
     -- Small delay to let the proxy plugin's HTTP server be ready
     core.after(2, function()
-        http.fetch({
+        nexus_http({
             url = PROXY_URL .. "/nexus/register",
             method = "POST",
             data = payload,
@@ -351,6 +525,43 @@ core.register_on_mods_loaded(function()
         end)
     end)
 end)
+
+-- =============================================================================
+-- Test Chat Command
+-- =============================================================================
+
+-- /travel <destination> — triggers the full nexus transfer pipeline.
+-- This goes through state capture → HTTP depart → proxy hop → state restore,
+-- unlike the proxy's raw >server command which only moves the connection.
+core.register_chatcommand("travel", {
+	params = "<destination>",
+	description = "Travel to another galaxy via the nexus transfer system (captures and restores state)",
+	privs = {},
+	func = function(name, param)
+		local destination = param:trim()
+		if destination == "" then
+			return false, "Usage: /travel <destination> (e.g. /travel beta)"
+		end
+
+		-- Don't allow travel to the server we're already on
+		if destination == GALAXY_NAME then
+			return false, "You are already on " .. GALAXY_LABEL
+		end
+
+		local player = core.get_player_by_name(name)
+		if not player then
+			return false, "Player not found"
+		end
+
+		core.chat_send_player(name, "[nexus] Initiating travel to '" .. destination .. "'...")
+		local ok, err = nexus.travel(player, destination)
+		if not ok then
+			return false, "Travel failed: " .. (err or "unknown error")
+		end
+
+		return true, "Departure initiated — state captured, transferring..."
+	end,
+})
 
 -- =============================================================================
 -- Utility API

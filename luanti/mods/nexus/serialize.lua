@@ -47,8 +47,8 @@ function nexus.serialize.restore_inventory(player, inv_data)
         inv:set_list(listname, {})
     end
 
-    -- Restore each list
-    for listname, list_data in pairs(inv_data) do
+    -- Restore each list (guard against nil: Luanti encodes empty tables as JSON null)
+    for listname, list_data in pairs(inv_data or {}) do
         local current_size = inv:get_size(listname)
 
         if current_size == 0 then
@@ -59,21 +59,24 @@ function nexus.serialize.restore_inventory(player, inv_data)
                 nexus.serialize.count_items(list_data) .. " items")
         else
             -- Resize if origin had a larger list
-            if list_data.size > current_size then
+            if list_data.size and list_data.size > current_size then
                 inv:set_size(listname, list_data.size)
             end
 
-            for slot_str, item_data in pairs(list_data.slots) do
+            -- Guard slots against nil (JSON null from empty table)
+            for slot_str, item_data in pairs(list_data.slots or {}) do
                 local slot = tonumber(slot_str)
-                local stack = ItemStack(item_data)
-                -- Restore item metadata
-                if item_data.meta then
-                    local meta = stack:get_meta()
-                    for key, value in pairs(item_data.meta) do
-                        meta:set_string(key, value)
+                if slot and slot >= 1 and slot <= current_size then
+                    local stack = ItemStack(item_data)
+                    -- Restore item metadata
+                    if item_data.meta then
+                        local meta = stack:get_meta()
+                        for key, value in pairs(item_data.meta) do
+                            meta:set_string(key, value)
+                        end
                     end
+                    inv:set_stack(listname, slot, stack)
                 end
-                inv:set_stack(listname, slot, stack)
             end
         end
     end
@@ -97,8 +100,8 @@ function nexus.serialize.restore_player_meta(player, meta_data)
             meta:set_string(key, "")
         end
     end
-    -- Set new values
-    for key, value in pairs(meta_data) do
+    -- Set new values (guard against nil from JSON null)
+    for key, value in pairs(meta_data or {}) do
         meta:set_string(key, value)
     end
 end
