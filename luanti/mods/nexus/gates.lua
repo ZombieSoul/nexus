@@ -95,7 +95,7 @@ local arrival_cooldown = {}
 
 -- Generate a human-readable address from position.
 local function make_address(pos)
-    return GALAXY .. ":g" .. math.abs(pos.x) .. "_" .. math.abs(pos.z)
+    return route_to_address(make_route(pos))
 end
 
 -- =============================================================================
