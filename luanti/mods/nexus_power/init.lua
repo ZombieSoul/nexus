@@ -17,13 +17,25 @@ local storage = core.get_mod_storage()
 -- Configuration
 -- =============================================================================
 
+-- Which ores generate on THIS world? Set via nexus_power.ores config.
+-- Examples:
+--   nexus_power.ores = resonite                  (starting world)
+--   nexus_power.ores = resonite,stellarite       (tier 1 destination)
+--   nexus_power.ores = resonite,stellarite,voidium (deep/hazardous world)
+-- If not set, defaults to resonite only (starting world).
+local ore_config = core.settings:get("nexus_power.ores") or "resonite"
+local world_ores = {}
+for ore in ore_config:gmatch("([%w_]+)") do
+    world_ores[ore] = true
+end
+
 local TIERS = {
     {
         name = "resonite",
         display = "Resonite",
         color = "#2a8a8a",
         tier = 1,  -- nexus.power.TIER.SAME_WORLD
-        -- Ore gen: shallow underground, uncommon
+        -- Ore gen: underground, uncommon (same depth range on all worlds)
         ore_y_min = -64,
         ore_y_max = -16,
         ore_scarcity = 8 * 8 * 8,    -- 1 in 512
@@ -37,10 +49,10 @@ local TIERS = {
         display = "Stellarite",
         color = "#aa5aca",
         tier = 2,  -- nexus.power.TIER.SAME_GALAXY
-        -- Ore gen: deep underground, rare
-        ore_y_min = -128,
-        ore_y_max = -65,
-        ore_scarcity = 12 * 12 * 12,  -- 1 in 1728
+        -- Ore gen: underground, rare (only on tier 1+ destination worlds)
+        ore_y_min = -64,
+        ore_y_max = -16,
+        ore_scarcity = 10 * 10 * 10,  -- 1 in 1000
         ore_num_ores = 4,
         ore_size = 3,
         power_per_ingot = 50,
@@ -50,10 +62,10 @@ local TIERS = {
         display = "Voidium",
         color = "#4a4aaa",
         tier = 3,  -- nexus.power.TIER.CROSS_GALAXY
-        -- Ore gen: very deep, very rare
-        ore_y_min = -31000,
-        ore_y_max = -129,
-        ore_scarcity = 16 * 16 * 16,  -- 1 in 4096
+        -- Ore gen: deep underground, very rare (only on dangerous worlds)
+        ore_y_min = -64,
+        ore_y_max = -16,
+        ore_scarcity = 12 * 12 * 12,  -- 1 in 1728
         ore_num_ores = 3,
         ore_size = 2,
         power_per_ingot = 500,
@@ -163,23 +175,30 @@ end
 local host_rocks = get_stone_types()
 
 for _, t in ipairs(TIERS) do
-    -- Register in each host rock type
-    for _, rock in ipairs(host_rocks) do
-        core.register_ore({
-            ore_type = "scatter",
-            name = "nexus_power:" .. t.name .. "_ore_in_" .. rock:gsub(":", "_"),
-            ore = "nexus_power:" .. t.name .. "_ore",
-            wherein = rock,
-            clust_scarcity = t.ore_scarcity,
-            clust_num_ores = t.ore_num_ores,
-            clust_size = t.ore_size,
-            y_min = t.ore_y_min,
-            y_max = t.ore_y_max,
-        })
+    -- Only register ores that this world is configured for
+    if not world_ores[t.name] then
+        core.log("action", "[nexus_power] " .. t.display ..
+            " ore NOT generated on this world (not in nexus_power.ores)")
+    else
+        -- Register in each host rock type
+        for _, rock in ipairs(host_rocks) do
+            core.register_ore({
+                ore_type = "scatter",
+                name = "nexus_power:" .. t.name .. "_ore_in_" .. rock:gsub(":", "_"),
+                ore = "nexus_power:" .. t.name .. "_ore",
+                wherein = rock,
+                clust_scarcity = t.ore_scarcity,
+                clust_num_ores = t.ore_num_ores,
+                clust_size = t.ore_size,
+                y_min = t.ore_y_min,
+                y_max = t.ore_y_max,
+            })
+        end
+        core.log("action", "[nexus_power] " .. t.display ..
+            " ore registered in: " ..
+            table.concat(host_rocks, ",") ..
+            " (y " .. t.ore_y_min .. " to " .. t.ore_y_max .. ")")
     end
-    core.log("action", "[nexus_power] " .. t.display .. " ore registered in: " ..
-        table.concat(host_rocks, ", ") ..
-        " (y " .. t.ore_y_min .. " to " .. t.ore_y_max .. ")")
 end
 
 -- =============================================================================
