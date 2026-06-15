@@ -1030,8 +1030,20 @@ core.register_on_player_receive_fields(function(player, formname, fields)
             return true
         end
 
+        -- Power check BEFORE dialing — don't open a wormhole you can't use
+        local route = address_to_route(dest)
+        local tier, tier_label = nexus.power.tier_for(
+            GALAXY, WORLD,
+            (route and route.galaxy) or GALAXY,
+            (route and route.world) or WORLD)
+        local can_afford, perr = nexus.power.check(address, tier)
+        if not can_afford then
+            core.chat_send_player(pname, "[nexus] " .. perr)
+            core.sound_play("nexus_gate_abort", {to_player = pname})
+            return true
+        end
+
         core.chat_send_player(pname, "[nexus] Dialing " .. dest .. "...")
-        core.sound_play("nexus_gate_dial", {to_player = pname})
 
         nexus.gate.establish_link(address, dest, pname, function(ok, info)
             if ok then
@@ -1366,6 +1378,17 @@ core.register_chatcommand("dial", {
         if nearest_dist > 100 then
             return false, "Nearest stargate is too far (" ..
                 math.floor(nearest_dist) .. " blocks)"
+        end
+
+        -- Power check BEFORE dialing
+        local route = address_to_route(dest)
+        local tier, tier_label = nexus.power.tier_for(
+            GALAXY, WORLD,
+            (route and route.galaxy) or GALAXY,
+            (route and route.world) or WORLD)
+        local can_afford, perr = nexus.power.check(nearest_addr, tier)
+        if not can_afford then
+            return false, perr
         end
 
         core.chat_send_player(name, "[nexus] Dialing " .. dest ..
