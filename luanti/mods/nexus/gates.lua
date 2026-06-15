@@ -1022,7 +1022,8 @@ core.register_on_player_receive_fields(function(player, formname, fields)
                         texture = "nexus_event_horizon.png",
                         glow = 14,
                     })
-                    show_gate_formspec(pos, player)
+                    -- Don't reopen the formspec — the player is watching the
+                    -- dialing animation, not interacting with the GUI
                 end)
             else
                 core.chat_send_player(pname, "[nexus] Dialing failed: " ..
