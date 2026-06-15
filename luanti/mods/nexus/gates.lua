@@ -90,6 +90,10 @@ local local_gates = {}
 -- Gates with active links on this server: address → true
 local linked_gates = {}
 
+-- Gates currently running their dialing sequence (prevents the poller
+-- from placing the event horizon before the sequence completes)
+local dialing_in_progress = {}
+
 -- Arrival cooldown to prevent immediate bounce-back (pname → expiry time)
 local arrival_cooldown = {}
 
@@ -388,16 +392,20 @@ local KEYSTONE_OFFSETS = {
     {-2, 5, 0},   -- K6 upper-left
 }
 
--- Portal opening offsets (where event horizon appears when linked)
-local PORTAL_OFFSETS = {
-    {0, 2, 0}, {0, 3, 0}, {0, 4, 0}, {0, 5, 0},
-    {1, 3, 0}, {1, 4, 0},
-    {-1, 3, 0}, {-1, 4, 0},
+-- Span blocks fill the gaps between keystones to form a solid ring
+local SPAN_OFFSETS = {
+    {1, 5, 0},          -- K1-K2 edge
+    {2, 3, 0}, {2, 4, 0},  -- K2-K3 edge
+    {1, 1, 0},          -- K3-K4 edge
+    {-1, 1, 0},         -- K4-K5 edge
+    {-2, 3, 0}, {-2, 4, 0}, -- K5-K6 edge
+    {-1, 5, 0},         -- K6-K1 edge
 }
 
--- All gate blocks (keystones + spans) for cleanup/destruction
+-- All frame blocks (keystones + spans) for cleanup/registration
 local ALL_FRAME_OFFSETS = {}
 for _, off in ipairs(KEYSTONE_OFFSETS) do ALL_FRAME_OFFSETS[#ALL_FRAME_OFFSETS+1] = off end
+for _, off in ipairs(SPAN_OFFSETS) do ALL_FRAME_OFFSETS[#ALL_FRAME_OFFSETS+1] = off end
 
 -- The center of the ring (trigger zone) is 3.5 blocks above the base
 local function get_center(base_pos)
@@ -410,7 +418,14 @@ local function get_arrival_pos(base_pos)
     return {x = c.x, y = c.y, z = c.z - 2}
 end
 
--- Legacy alias for code that references RING_OFFSETS
+-- Portal opening offsets (where event horizon appears when linked)
+local PORTAL_OFFSETS = {
+    {0, 2, 0}, {0, 3, 0}, {0, 4, 0}, {0, 5, 0},
+    {1, 3, 0}, {1, 4, 0},
+    {-1, 3, 0}, {-1, 4, 0},
+}
+
+-- Legacy alias
 local RING_OFFSETS = ALL_FRAME_OFFSETS
 
 local function register_gate_at(pos)
@@ -808,6 +823,16 @@ core.register_node(GATE_NODE, {
 -- Forward-declared destruct handler (defined after node registrations)
 local keystone_destruct_handler
 
+-- Span block (structural frame between keystones)
+core.register_node(SPAN_NODE, {
+    description = "Gate Span",
+    tiles = {"nexus_span.png"},
+    groups = {cracky = 3, not_in_creative_inventory = 1},
+    light_source = 1,
+    drop = "",
+    on_destruct = keystone_destruct_handler,  -- same cascade cleanup
+})
+
 -- Unlit keystone
 core.register_node(KEYSTONE_OFF, {
     description = "Gate Keystone",
@@ -841,7 +866,7 @@ local function keystone_destruct_handler(pos)
                 -- Remove all keystones
                 for _, off2 in ipairs(KEYSTONE_OFFSETS) do
                     local p = {x = base_pos.x + off2[1], y = base_pos.y + off2[2], z = base_pos.z + off2[3]}
-                    if is_keystone(core.get_node(p).name) then
+                    if is_keystone(core.get_node(p).name) or core.get_node(p).name == SPAN_NODE then
                         core.remove_node(p)
                     end
                 end
@@ -971,8 +996,12 @@ core.register_on_player_receive_fields(function(player, formname, fields)
                 core.chat_send_player(pname, "[nexus] Connection established — dialing " ..
                     #symbols .. " symbols (" .. tier_label .. ")...")
 
+                -- Mark as dialing so the poller doesn't place the horizon early
+                dialing_in_progress[address] = true
+
                 play_dialing_sequence(pos, symbols, tier, function()
                     -- Sequence complete — open the portal
+                    dialing_in_progress[address] = nil
                     linked_gates[address] = true
                     place_event_horizon(pos)
                     core.chat_send_player(pname, "[nexus] Wormhole established!")
@@ -1240,6 +1269,12 @@ core.register_chatcommand("placegate", {
             core.set_node(p, {name = KEYSTONE_OFF})
         end
 
+        -- Place span blocks between vertices
+        for _, off in ipairs(SPAN_OFFSETS) do
+            local p = {x = pos.x + off[1], y = pos.y + off[2], z = pos.z + off[3]}
+            core.set_node(p, {name = SPAN_NODE})
+        end
+
         -- Place base block (triggers on_construct → registration)
         core.set_node(pos, {name = GATE_NODE})
 
@@ -1351,7 +1386,7 @@ core.register_chatcommand("removegate", {
         -- Remove all keystones
         for _, off in ipairs(KEYSTONE_OFFSETS) do
             local p = {x = nearest_pos.x + off[1], y = nearest_pos.y + off[2], z = nearest_pos.z + off[3]}
-            if is_keystone(core.get_node(p).name) then
+            if is_keystone(core.get_node(p).name) or core.get_node(p).name == SPAN_NODE then
                 core.remove_node(p)
             end
             -- Also clean up old ring nodes
@@ -1451,12 +1486,18 @@ core.register_globalstep(function(dtime)
             local was_linked = linked_gates[address] ~= nil
 
             if is_linked and not was_linked then
-                -- Link just appeared — place event horizon
-                linked_gates[address] = true
-                place_event_horizon(gate_data.pos)
-                core.sound_play("nexus_gate_open", {
-                    pos = gate_data.center, max_hear_distance = 30, gain = 0.6
-                })
+                -- Link just appeared — but skip if this gate is currently dialing
+                -- (the dialing sequence will place the horizon when it completes)
+                if dialing_in_progress[address] then
+                    linked_gates[address] = true  -- track it, but don't place horizon yet
+                else
+                    -- Incoming link or local link detected — place event horizon
+                    linked_gates[address] = true
+                    place_event_horizon(gate_data.pos)
+                    core.sound_play("nexus_gate_open", {
+                        pos = gate_data.center, max_hear_distance = 30, gain = 0.6
+                    })
+                end
             elseif not is_linked and was_linked then
                 -- Link just disappeared — remove event horizon
                 linked_gates[address] = nil
