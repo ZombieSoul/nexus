@@ -26,6 +26,7 @@ local GALAXY_LABEL = core.settings:get("nexus.galaxy_label") or GALAXY_NAME
 local GALAXY_TIER = tonumber(core.settings:get("nexus.galaxy_tier") or "1")
 local WORLD_NAME = core.settings:get("nexus.world_name") or GALAXY_NAME
 local ALLOW_SAME_WORLD = core.settings:get_bool("nexus.allow_same_world_travel", true)
+local REQUIRE_POWER = core.settings:get_bool("nexus.require_power", false)
 local HTTP_TIMEOUT = tonumber(core.settings:get("nexus.timeout") or "10")
 
 -- Shared API secret — must match the proxy plugin's NEXUS_API_SECRET.
@@ -57,6 +58,7 @@ nexus._config = {
     galaxy_tier = GALAXY_TIER,
     world_name = WORLD_NAME,
     allow_same_world = ALLOW_SAME_WORLD,
+    require_power = REQUIRE_POWER,
     http_timeout = HTTP_TIMEOUT,
 }
 
@@ -630,7 +632,15 @@ function nexus._handle_gate_arrival(player, arrival_gate)
 end
 
 -- =============================================================================
--- Gate System (loaded last — needs nexus._http, nexus._config, nexus.travel)
+-- =============================================================================
+-- Power Interface (loaded before gates — gates depends on nexus.power)
+-- =============================================================================
+
+dofile(modpath .. "/power.lua")
+
+-- =============================================================================
+-- Gate System (loaded last — needs nexus._http, nexus._config, nexus.travel,
+-- nexus.power)
 -- =============================================================================
 
 dofile(modpath .. "/gates.lua")

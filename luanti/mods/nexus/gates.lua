@@ -217,6 +217,20 @@ function nexus.gate.travel_player(player, gate_address)
         -- Resolve the remote route from the address
         local remote = address_to_route(link.remote_address)
         local remote_world = (remote and remote.world) or link.remote_world
+        local remote_galaxy = (remote and remote.galaxy) or link.remote_galaxy
+
+        -- Power check: determine the tier and verify the gate can afford it.
+        -- If nexus.power has no provider (or require_power=false), this
+        -- always passes — gates are free.
+        local tier, tier_label = nexus.power.tier_for(
+            GALAXY, WORLD, remote_galaxy or GALAXY, remote_world or WORLD)
+        local can_afford, perr = nexus.power.check(gate_address, tier)
+        if not can_afford then
+            core.chat_send_player(pname, "[nexus] " .. perr)
+            core.log("action", "[nexus] " .. pname ..
+                " travel blocked: insufficient power (" .. tier_label .. ")")
+            return
+        end
 
         if remote_world == WORLD then
             -- SAME WORLD: instant local teleport (if allowed)
@@ -225,6 +239,13 @@ function nexus.gate.travel_player(player, gate_address)
                 core.chat_send_player(pname, "[nexus] Same-world gate travel is disabled.")
                 return
             end
+
+            -- Consume power for this trip
+            if not nexus.power.consume(gate_address, tier) then
+                core.chat_send_player(pname, "[nexus] Power draw failed. Try again.")
+                return
+            end
+
             nexus.gate.get_info(link.remote_address, function(info)
                 if not info or not info.gate then
                     core.chat_send_player(pname, "[nexus] Destination gate lost.")
@@ -251,6 +272,13 @@ function nexus.gate.travel_player(player, gate_address)
             -- CROSS WORLD: proxy hop + state sync (same galaxy = interstellar,
             -- different galaxy = intergalactic — mechanism is the same,
             -- power cost differentiation comes with the energy system)
+
+            -- Consume power for this trip
+            if not nexus.power.consume(gate_address, tier) then
+                core.chat_send_player(pname, "[nexus] Power draw failed. Try again.")
+                return
+            end
+
             nexus.travel(player, remote_world or link.remote_galaxy, {
                 arrival_gate = link.remote_address,
                 departure_gate = gate_address,
