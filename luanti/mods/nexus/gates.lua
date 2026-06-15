@@ -586,6 +586,23 @@ local function play_dialing_sequence(base_pos, symbols, tier, on_complete)
     light_keystone(1)
 end
 
+-- Forward declarations for keystone helpers (defined later, needed by reset_keystones)
+local KEYSTONE_COLORS = {
+    "red", "orange", "yellow", "green", "cyan", "blue",
+    "violet", "magenta", "white", "pink", "lime", "amber",
+}
+local KEYSTONE_OFF = "nexus:keystone_off"
+local function keystone_lit_name(color)
+    return "nexus:keystone_lit_" .. color
+end
+local function is_keystone(name)
+    if name == KEYSTONE_OFF then return true end
+    for _, color in ipairs(KEYSTONE_COLORS) do
+        if name == keystone_lit_name(color) then return true end
+    end
+    return false
+end
+
 -- Reset all keystones to unlit (called when link closes)
 local function reset_keystones(base_pos)
     for _, off in ipairs(KEYSTONE_OFFSETS) do
@@ -595,7 +612,6 @@ local function reset_keystones(base_pos)
         end
     end
 end
-
 local function show_gate_formspec(pos, player)
     local pname = player:get_player_name()
     local meta = core.get_meta(pos)
@@ -779,29 +795,8 @@ core.register_node(GATE_NODE, {
 -- during dialing IS the address — players can recognize destinations by
 -- their color pattern.
 
-local KEYSTONE_COLORS = {
-    "red", "orange", "yellow", "green", "cyan", "blue",
-    "violet", "magenta", "white", "pink", "lime", "amber",
-}
-
-local KEYSTONE_OFF = "nexus:keystone_off"
-
 -- Forward-declared destruct handler (defined after node registrations)
 local keystone_destruct_handler
-
--- Generate lit keystone node names: nexus:keystone_lit_red, etc.
-local function keystone_lit_name(color)
-    return "nexus:keystone_lit_" .. color
-end
-
--- Check if a node name is any keystone variant
-local function is_keystone(name)
-    if name == KEYSTONE_OFF then return true end
-    for _, color in ipairs(KEYSTONE_COLORS) do
-        if name == keystone_lit_name(color) then return true end
-    end
-    return false
-end
 
 -- Unlit keystone
 core.register_node(KEYSTONE_OFF, {
