@@ -70,3 +70,7 @@ luanti/config/nexus_secret
 .codox/
 .pi/
 project.codex
+
+# Mineclonia worlds (generated at runtime)
+luanti/worlds/earth/
+luanti/worlds/proxima/
