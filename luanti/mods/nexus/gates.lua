@@ -396,6 +396,13 @@ local function register_gate_at(pos)
     meta:set_string("address", address)
     meta:set_string("infotext", "Stargate: " .. address)
 
+    -- Ensure the crystal slot inventory exists (set up here so it works
+    -- for both newly-placed gates AND gates re-loaded via LBM on restart)
+    local inv = meta:get_inventory()
+    if inv:get_size("crystal") == 0 then
+        inv:set_size("crystal", 1)
+    end
+
     local center = get_center(pos)
     local arrival = get_arrival_pos(pos)
 
@@ -465,26 +472,27 @@ local function show_gate_formspec(pos, player)
 
     local parts = {
         "formspec_version[4]",
-        "size[10,9]",
+        "size[10,12]",
         "no_prepend[]",
         "bgcolor[#0A0A2A;true]",
         string.format(
-            "hypertext[0.5,0.3;9,1;addr;<global halign=center><style color=#00BFFF size=18>Stargate: %s</style>]",
+            "hypertext[0.5,0.2;9,0.8;addr;<global halign=center><style color=#00BFFF size=18>Stargate: %s</style>]",
             core.formspec_escape(address)),
         string.format(
-            "hypertext[0.5,1.1;9,0.6;status;<global halign=center><style color=#%s size=14>%s</style>]",
+            "hypertext[0.5,0.9;9,0.5;status;<global halign=center><style color=#%s size=14>%s</style>]",
             status_color, status),
-        -- Crystal slot
-        "listcolors[#222233;#333355;#000000]",
-        "label[0.5,1.9;Crystal:]",
-        string.format("list[nodemeta:%d,%d,%d;crystal;2,1.8;1,1;]", pos.x, pos.y, pos.z),
-        "label[3,2;Insert a resonance crystal to",
-        "label[3,2.3;load saved addresses]",
+        -- Crystal slot + label
+        "label[0.5,1.8;Crystal slot:]",
+        "listcolors[#333355;#555577;#000000;#444466;#666688]",
+        -- Visible box behind the slot so players can see it
+        string.format("box[2.9,1.6;1.2,1.2;#333355]"),
+        string.format("list[nodemeta:%d,%d,%d;crystal;3,1.7;1,1;]", pos.x, pos.y, pos.z),
+        "hypertext[4.5,1.7;5,1.2;slot_help;<style color=#888888 size=12>Insert a resonance crystal here to load saved addresses.\\nShift-click the crystal in your inventory below to insert it.</style>]",
     }
 
     -- Crystal addresses or PIN entry
     local crystal = nexus.crystal.get_gate_crystal(pos)
-    local y = 3.2
+    local y = 3.1
 
     if crystal then
         local is_private = nexus.crystal.is_private(crystal)
@@ -498,6 +506,7 @@ local function show_gate_formspec(pos, player)
             parts[#parts+1] = string.format("pwd[3,%f;4,0.8;gate_pin;PIN]", y)
             y = y + 1.0
             parts[#parts+1] = string.format("button[3,%f;4,0.8;unlock;Unlock]", y)
+            y = y + 1.2
         elseif unlocked then
             -- Show saved addresses as buttons
             local addrs = nexus.crystal.get_gate_addresses(pos)
@@ -534,6 +543,14 @@ local function show_gate_formspec(pos, player)
     y = y + 0.9
     parts[#parts+1] = string.format("button[1,%f;3,0.8;dial;Dial]", y)
     parts[#parts+1] = string.format("button[5,%f;3,0.8;close;Close Link]", y)
+    y = y + 1.2
+
+    -- Player inventory (shown so players can drag/shift-click crystals into the gate slot)
+    parts[#parts+1] = "hypertext[0.5,0;0,0;inv_label;]"  -- placeholder
+    parts[#parts+1] = string.format("list[current_player;main;1,%f;8,4;]", y)
+    -- Listrings enable shift-click to move items between gate crystal slot and player inventory
+    parts[#parts+1] = string.format("listring[nodemeta:%d,%d,%d;crystal]", pos.x, pos.y, pos.z)
+    parts[#parts+1] = "listring[current_player;main]"
 
     -- Store position in player meta so the formspec handler knows which gate
     local pmeta = player:get_meta()

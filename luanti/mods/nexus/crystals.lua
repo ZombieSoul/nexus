@@ -167,8 +167,9 @@ core.register_craftitem(CRYSTAL_ITEM, {
     groups = {nexus_crystal = 1},
     stack_max = 1,  -- each crystal is unique (has metadata)
 
-    on_use = function(itemstack, player, pointed_thing)
-        -- Right-click (use) opens the crystal management GUI
+    -- Right-click while pointing at air/empty space opens the management GUI.
+    -- (When pointing at a node, that node's on_rightclick takes priority.)
+    on_secondary_use = function(itemstack, player, pointed_thing)
         nexus.crystal.show_manage_gui(itemstack, player)
         return nil  -- don't consume the item
     end,
@@ -251,6 +252,23 @@ core.register_on_player_receive_fields(function(player, formname, fields)
     if not nexus.crystal.is_crystal(stack) then
         core.chat_send_player(pname, "[nexus] Crystal not found in hand.")
         return true
+    end
+
+    -- Safety: if somehow we have a stack > 1 (e.g. crystals obtained before
+    -- stack_max=1 was enforced), split off one crystal to modify. The rest
+    -- stays blank in the inventory.
+    if stack:get_count() > 1 then
+        local remainder = ItemStack(stack)
+        remainder:set_count(stack:get_count() - 1)
+        -- Clear metadata on the remainder so they're truly blank
+        local rmeta = remainder:get_meta()
+        rmeta:set_string("nexus_crystal", "")
+        rmeta:set_string("description", "")
+        inv:set_stack("main", idx, remainder)
+        stack:set_count(1)
+        -- The single modified crystal goes into the hand (same slot now has
+        -- remainder; add the single crystal after)
+        inv:add_item("main", stack)
     end
 
     if fields.add then
