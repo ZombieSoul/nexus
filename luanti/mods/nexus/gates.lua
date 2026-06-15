@@ -736,6 +736,7 @@ core.register_on_player_receive_fields(function(player, formname, fields)
     end
 
     -- Handle crystal address button clicks (numeric index → actual address)
+    local dial_addr = nil
     for field_name in pairs(fields) do
         local clicked_idx = field_name:match("^addrbtn_(%d+)$")
         if clicked_idx then
@@ -744,15 +745,15 @@ core.register_on_player_receive_fields(function(player, formname, fields)
                 local addr_map = core.parse_json(addr_map_str)
                 local dest = addr_map and addr_map[clicked_idx]
                 if dest then
-                    fields.dest = dest
+                    dial_addr = dest
                     break
                 end
             end
         end
     end
 
-    if fields.dial then
-        local dest = (fields.dest or ""):trim()
+    if dial_addr or fields.dial then
+        local dest = dial_addr or (fields.dest or ""):trim()
         if dest == "" then
             core.chat_send_player(pname, "[nexus] Enter a destination address")
             return true
