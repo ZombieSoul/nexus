@@ -481,6 +481,23 @@ end
 -- color of the symbol being dialed. The color sequence IS the address.
 -- Per-tier timing controls drama: same-world is fast, cross-galaxy is ceremonial.
 
+-- Keystone node names and helpers (MUST be defined before play_dialing_sequence)
+local KEYSTONE_COLORS = {
+    "red", "orange", "yellow", "green", "cyan", "blue",
+    "violet", "magenta", "white", "pink", "lime", "amber",
+}
+local KEYSTONE_OFF = "nexus:keystone_off"
+local function keystone_lit_name(color)
+    return "nexus:keystone_lit_" .. color
+end
+local function is_keystone(name)
+    if name == KEYSTONE_OFF then return true end
+    for _, color in ipairs(KEYSTONE_COLORS) do
+        if name == keystone_lit_name(color) then return true end
+    end
+    return false
+end
+
 -- Hash a string to a color index (1-12)
 local function hash_to_symbol(s)
     local h = 0
@@ -584,23 +601,6 @@ local function play_dialing_sequence(base_pos, symbols, tier, on_complete)
     end
 
     light_keystone(1)
-end
-
--- Forward declarations for keystone helpers (defined later, needed by reset_keystones)
-local KEYSTONE_COLORS = {
-    "red", "orange", "yellow", "green", "cyan", "blue",
-    "violet", "magenta", "white", "pink", "lime", "amber",
-}
-local KEYSTONE_OFF = "nexus:keystone_off"
-local function keystone_lit_name(color)
-    return "nexus:keystone_lit_" .. color
-end
-local function is_keystone(name)
-    if name == KEYSTONE_OFF then return true end
-    for _, color in ipairs(KEYSTONE_COLORS) do
-        if name == keystone_lit_name(color) then return true end
-    end
-    return false
 end
 
 -- Reset all keystones to unlit (called when link closes)
