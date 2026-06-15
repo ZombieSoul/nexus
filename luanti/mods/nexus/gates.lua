@@ -16,6 +16,9 @@ local GALAXY = cfg.galaxy_name
 local WORLD = cfg.world_name or GALAXY
 local ALLOW_SAME_WORLD = cfg.allow_same_world ~= false
 
+-- Mod storage for gate persistence (survives server restart)
+local storage = core.get_mod_storage()
+
 -- Dial timing (per-symbol, per-tier). Controls how dramatic the dialing sequence is.
 local DIAL_TIME = {
     same_world   = tonumber(core.settings:get("nexus.dial_time_same_world")) or 1.0,
@@ -442,6 +445,11 @@ local function register_gate_at(pos)
         inv:set_size("crystal", 1)
     end
 
+    -- Persist gate position in mod_storage so we can re-register ALL gates
+    -- on server startup — not just ones in loaded chunks.
+    storage:set_string("gate_" .. address,
+        pos.x .. "," .. pos.y .. "," .. pos.z)
+
     local center = get_center(pos)
     local arrival = get_arrival_pos(pos)
 
@@ -494,6 +502,9 @@ local function unregister_gate_at(pos)
 
     local_gates[address] = nil
     linked_gates[address] = nil
+
+    -- Remove from mod_storage
+    storage:set_string("gate_" .. address, "")
 
     nexus.gate.unregister(address)
     core.log("action", "[nexus] gate destroyed: " .. address)
@@ -912,6 +923,44 @@ core.register_lbm({
         register_gate_at(pos)
     end,
 })
+
+-- On server startup, re-register ALL gates from mod_storage — even ones in
+-- unloaded chunks. This ensures gates are always dialable as soon as the
+-- server starts, without needing a player to physically visit them first.
+core.register_on_mods_loaded(function()
+    -- Small delay to let the proxy HTTP API be ready
+    core.after(3, function()
+        local keys = storage:to_table().fields
+        local count = 0
+        for key, val in pairs(keys) do
+            if key:match("^gate_") and val ~= "" then
+                local parts = string.split(val, ",")
+                local pos = {
+                    x = tonumber(parts[1]),
+                    y = tonumber(parts[2]),
+                    z = tonumber(parts[3]),
+                }
+                if pos.x then
+                    -- Verify the gate node still exists at this position
+                    local node = core.get_node(pos)
+                    if node.name == GATE_NODE then
+                        register_gate_at(pos)
+                        count = count + 1
+                    else
+                        -- Gate was destroyed while server was offline — clean up
+                        local address = key:sub(5)  -- strip "gate_" prefix
+                        storage:set_string(key, "")
+                        core.log("action", "[nexus] cleaned up stale gate: " .. address)
+                    end
+                end
+            end
+        end
+        if count > 0 then
+            core.log("action", "[nexus] re-registered " .. count ..
+                " gate(s) from storage on startup")
+        end
+    end)
+end)
 
 -- =============================================================================
 -- Formspec Handler (Dial / Close)
