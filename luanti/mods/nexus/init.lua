@@ -638,9 +638,11 @@ end
 
 dofile(modpath .. "/power.lua")
 
+dofile(modpath .. "/crystals.lua")
+
 -- =============================================================================
 -- Gate System (loaded last — needs nexus._http, nexus._config, nexus.travel,
--- nexus.power)
+-- nexus.power, nexus.crystal)
 -- =============================================================================
 
 dofile(modpath .. "/gates.lua")

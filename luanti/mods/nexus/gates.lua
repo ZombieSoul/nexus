@@ -461,30 +461,86 @@ local function show_gate_formspec(pos, player)
     local linked = linked_gates[address] ~= nil
 
     local status = linked and "Linked (wormhole open)" or "Idle"
-    local status_color = linked and "#00FF00" or "#888888"
+    local status_color = linked and "00FF00" or "888888"
 
-    local formspec = table.concat({
+    local parts = {
         "formspec_version[4]",
-        "size[8,6]",
+        "size[10,9]",
         "no_prepend[]",
         "bgcolor[#0A0A2A;true]",
-        "hypertext[0.5,0.5;7,1;addr;<global halign=center><style color=#00BFFF size=18>" ..
-            "Stargate: " .. core.formspec_escape(address) .. "</style>]",
-        "hypertext[0.5,1.3;7,0.6;status;<global halign=center><style color=" ..
-            status_color .. " size=14>" .. status .. "</style>]",
-        "field[1,2.3;6,0.8;dest;Destination Address;]",
-        "button[1,3.3;3,0.8;dial;Dial]",
-        "button[4.5,3.3;3,0.8;close;Close Link]",
-        "hypertext[0.5,4.5;7,1;hint;<global halign=center><style color=#666666 size=12>" ..
-            "Walk through the gate to travel when linked</style>]",
-    })
+        string.format(
+            "hypertext[0.5,0.3;9,1;addr;<global halign=center><style color=#00BFFF size=18>Stargate: %s</style>]",
+            core.formspec_escape(address)),
+        string.format(
+            "hypertext[0.5,1.1;9,0.6;status;<global halign=center><style color=#%s size=14>%s</style>]",
+            status_color, status),
+        -- Crystal slot
+        "listcolors[#222233;#333355;#000000]",
+        "label[0.5,1.9;Crystal:]",
+        string.format("list[nodemeta:%d,%d,%d;crystal;2,1.8;1,1;]", pos.x, pos.y, pos.z),
+        "label[3,2;Insert a resonance crystal to",
+        "label[3,2.3;load saved addresses]",
+    }
+
+    -- Crystal addresses or PIN entry
+    local crystal = nexus.crystal.get_gate_crystal(pos)
+    local y = 3.2
+
+    if crystal then
+        local is_private = nexus.crystal.is_private(crystal)
+        local unlocked = nexus.crystal.is_gate_unlocked(pos)
+
+        if is_private and not unlocked then
+            -- Show PIN entry
+            parts[#parts+1] = string.format(
+                "hypertext[0.5,%f;9,0.5;pin_hint;<global halign=center><style color=#FF8800 size=14>Private crystal — enter PIN to activate</style>]", y)
+            y = y + 0.7
+            parts[#parts+1] = string.format("pwd[3,%f;4,0.8;gate_pin;PIN]", y)
+            y = y + 1.0
+            parts[#parts+1] = string.format("button[3,%f;4,0.8;unlock;Unlock]", y)
+        elseif unlocked then
+            -- Show saved addresses as buttons
+            local addrs = nexus.crystal.get_gate_addresses(pos)
+            local has_addrs = false
+            local btn_x = 0.5
+            local btn_y = y
+            local col = 0
+            for addr, entry in pairs(addrs) do
+                has_addrs = true
+                local lock_icon = entry.encrypted and " \194\187" or ""
+                local safe_label = core.formspec_escape(entry.label .. lock_icon)
+                parts[#parts+1] = string.format(
+                    "button[%f,%f;4.4,0.6;addr_%s;%s]",
+                    btn_x, btn_y, addr:gsub(":", "_"), safe_label)
+                col = col + 1
+                if col >= 2 then
+                    col = 0
+                    btn_x = 0.5
+                    btn_y = btn_y + 0.7
+                else
+                    btn_x = 5.1
+                end
+            end
+            if not has_addrs then
+                parts[#parts+1] = string.format(
+                    "hypertext[0.5,%f;9,0.5;no_addr;<global halign=center><style color=#666666 size=13>Crystal has no saved addresses</style>]", y)
+            end
+            y = btn_y + 0.8
+        end
+    end
+
+    -- Manual dial section
+    parts[#parts+1] = string.format("field[1,%f;7,0.8;dest;Or type an address;]", y)
+    y = y + 0.9
+    parts[#parts+1] = string.format("button[1,%f;3,0.8;dial;Dial]", y)
+    parts[#parts+1] = string.format("button[5,%f;3,0.8;close;Close Link]", y)
 
     -- Store position in player meta so the formspec handler knows which gate
     local pmeta = player:get_meta()
     pmeta:set_string("nexus_gate_pos",
         pos.x .. "," .. pos.y .. "," .. pos.z)
 
-    core.show_formspec(pname, "nexus:gate_dial", formspec)
+    core.show_formspec(pname, "nexus:gate_dial", table.concat(parts, "\n"))
 end
 
 core.register_node(GATE_NODE, {
@@ -502,14 +558,50 @@ core.register_node(GATE_NODE, {
 
     on_construct = function(pos)
         register_gate_at(pos)
+        -- Crystal slot inventory (1 slot)
+        local meta = core.get_meta(pos)
+        local inv = meta:get_inventory()
+        inv:set_size("crystal", 1)
     end,
 
     on_destruct = function(pos)
+        -- Drop the crystal before unregistering
+        local meta = core.get_meta(pos)
+        local inv = meta:get_inventory()
+        if inv:get_list("crystal") then
+            local crystal = inv:get_stack("crystal", 1)
+            if not crystal:is_empty() then
+                core.add_item(pos, crystal)
+            end
+        end
+        nexus.crystal.lock(pos)
         unregister_gate_at(pos)
     end,
 
     on_rightclick = function(pos, node, player, itemstack, pointed_thing)
         show_gate_formspec(pos, player)
+    end,
+
+    -- Allow placing crystals from the hand
+    allow_metadata_inventory_put = function(pos, listname, index, stack, player)
+        if listname == "crystal" and nexus.crystal.is_crystal(stack) then
+            return 1
+        end
+        return 0
+    end,
+
+    allow_metadata_inventory_take = function(pos, listname, index, stack, player)
+        return 1
+    end,
+
+    on_metadata_inventory_put = function(pos, listname, index, stack, player)
+        -- Lock the gate crystal slot when a new crystal is inserted
+        nexus.crystal.lock(pos)
+    end,
+
+    on_metadata_inventory_take = function(pos, listname, index, stack, player)
+        -- Lock when removed
+        nexus.crystal.lock(pos)
     end,
 })
 
@@ -599,6 +691,29 @@ core.register_on_player_receive_fields(function(player, formname, fields)
     local parts = string.split(pos_str, ",")
     local pos = {x = tonumber(parts[1]), y = tonumber(parts[2]), z = tonumber(parts[3])}
     local address = core.get_meta(pos):get_string("address")
+
+    -- Handle PIN unlock
+    if fields.unlock then
+        local ok, err = nexus.crystal.try_unlock(pos, fields.gate_pin or "")
+        if ok then
+            core.chat_send_player(pname, "[nexus] Crystal unlocked.")
+        else
+            core.chat_send_player(pname, "[nexus] " .. (err or "Unlock failed."))
+        end
+        show_gate_formspec(pos, player)
+        return true
+    end
+
+    -- Handle crystal address button clicks
+    for field_name in pairs(fields) do
+        local clicked_addr = field_name:match("^addr_(.+)$")
+        if clicked_addr then
+            -- Convert _ back to : (address had : replaced for formspec names)
+            local dest = clicked_addr:gsub("_", ":")
+            fields.dest = dest
+            break
+        end
+    end
 
     if fields.dial then
         local dest = (fields.dest or ""):trim()
