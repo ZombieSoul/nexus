@@ -715,6 +715,13 @@ core.register_on_player_receive_fields(function(player, formname, fields)
     if formname ~= "nexus:gate_dial" then return end
 
     local pname = player:get_player_name()
+    -- Debug: log all field names so we can see what the client sends
+    local field_names = {}
+    for k, v in pairs(fields) do
+        table.insert(field_names, k .. (type(v) == "string" and v ~= "" and "=" .. v or ""))
+    end
+    core.log("action", "[nexus] gate_dial fields from " .. pname .. ": " ..
+        table.concat(field_names, ", "))
     local pmeta = player:get_meta()
     local pos_str = pmeta:get_string("nexus_gate_pos")
     if pos_str == "" then return end
@@ -741,14 +748,23 @@ core.register_on_player_receive_fields(function(player, formname, fields)
         local clicked_idx = field_name:match("^addrbtn_(%d+)$")
         if clicked_idx then
             local addr_map_str = pmeta:get_string("nexus_addr_map")
-            if addr_map_str ~= "" then
-                local addr_map = core.parse_json(addr_map_str)
-                local dest = addr_map and addr_map[clicked_idx]
-                if dest then
-                    dial_addr = dest
-                    break
-                end
+            if addr_map_str == "" then
+                core.chat_send_player(pname, "[nexus] ERROR: no address map found")
+                core.sound_play("nexus_gate_abort", {to_player = pname})
+                return true
             end
+            local addr_map = core.parse_json(addr_map_str)
+            local dest = addr_map and addr_map[tonumber(clicked_idx)]
+            if not dest then
+                core.chat_send_player(pname, "[nexus] ERROR: address button " ..
+                    clicked_idx .. " not in map")
+                core.sound_play("nexus_gate_abort", {to_player = pname})
+                return true
+            end
+            dial_addr = dest
+            core.chat_send_player(pname, "[nexus] Dialing " .. dest .. "...")
+            core.sound_play("nexus_gate_dial", {to_player = pname})
+            break
         end
     end
 
