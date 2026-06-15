@@ -1297,6 +1297,70 @@ core.register_chatcommand("dial", {
     end,
 })
 
+-- /removegate — remove the nearest gate (for cleanup of old/broken gates)
+core.register_chatcommand("removegate", {
+    params = "",
+    description = "Remove the nearest stargate and all its blocks",
+    privs = {give = true},
+    func = function(name)
+        local player = core.get_player_by_name(name)
+        if not player then return false end
+
+        local ppos = player:get_pos()
+        local nearest_pos = nil
+        local nearest_dist = math.huge
+
+        for addr, data in pairs(local_gates) do
+            local dist = vector.distance(ppos, data.pos)
+            if dist < nearest_dist then
+                nearest_dist = dist
+                nearest_pos = data.pos
+            end
+        end
+
+        if not nearest_pos then
+            -- Maybe it's an old base block not in local_gates. Search nearby.
+            for x = -3, 3 do
+                for y = -2, 6 do
+                    for z = -3, 3 do
+                        local p = {x = ppos.x + x, y = ppos.y + y, z = ppos.z + z}
+                        local node = core.get_node(p)
+                        if node.name == GATE_NODE then
+                            nearest_pos = p
+                            break
+                        end
+                    end
+                end
+            end
+        end
+
+        if not nearest_pos then
+            return false, "No stargate found nearby"
+        end
+
+        -- Remove all keystones
+        for _, off in ipairs(KEYSTONE_OFFSETS) do
+            local p = {x = nearest_pos.x + off[1], y = nearest_pos.y + off[2], z = nearest_pos.z + off[3]}
+            if is_keystone(core.get_node(p).name) then
+                core.remove_node(p)
+            end
+            -- Also clean up old ring nodes
+            local old_ring = core.get_node(p)
+            if old_ring.name == "nexus:gate_ring" then
+                core.remove_node(p)
+            end
+        end
+        -- Remove event horizon
+        remove_event_horizon(nearest_pos)
+        -- Remove base block
+        if core.get_node(nearest_pos).name == GATE_NODE then
+            core.remove_node(nearest_pos)
+        end
+
+        return true, "Stargate removed"
+    end,
+})
+
 -- /closegate — close the nearest gate's link
 core.register_chatcommand("closegate", {
     params = "",
