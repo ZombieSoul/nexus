@@ -16,6 +16,13 @@ local GALAXY = cfg.galaxy_name
 local WORLD = cfg.world_name or GALAXY
 local ALLOW_SAME_WORLD = cfg.allow_same_world ~= false
 
+-- Dial timing (per-symbol, per-tier). Controls how dramatic the dialing sequence is.
+local DIAL_TIME = {
+    same_world   = tonumber(core.settings:get("nexus.dial_time_same_world")) or 1.0,
+    same_galaxy  = tonumber(core.settings:get("nexus.dial_time_same_galaxy")) or 1.5,
+    cross_galaxy = tonumber(core.settings:get("nexus.dial_time_cross_galaxy")) or 2.0,
+}
+
 -- =============================================================================
 -- Address Conversion Layer
 -- =============================================================================
@@ -343,45 +350,48 @@ end
 -- When destroyed, it unregisters. Right-click shows the dial formspec.
 
 local GATE_NODE = "nexus:gate_base"
-local RING_NODE = "nexus:gate_ring"
 local HORIZON_NODE = "nexus:event_horizon"
+local SPAN_NODE = "nexus:gate_span"
 
 -- =============================================================================
--- Gate Structure Geometry
+-- Hexagonal Gate Geometry
 -- =============================================================================
--- The gate is a 3-wide, 5-tall ring. The base block is the controller,
--- placed at the bottom-center. Ring blocks form the frame. The portal
--- opening is the center column (3 blocks tall). The event horizon fills
--- the opening when linked.
+-- The gate is a HEXAGONAL ring of 6 keystones. The base block is the
+-- controller at the bottom. Each keystone lights up with the color of the
+-- symbol being dialed — the color sequence IS the address.
 --
 -- Layout (relative to base block at origin, facing north / -Z):
 --
---   Ring Ring Ring    y+4   top of ring
---   Ring Air  Ring    y+3
---   Ring Air  Ring    y+2   ← center (trigger zone, event horizon)
---   Ring Air  Ring    y+1
---   Ring Base Ring    y+0   bottom
---
--- Players/items arrive 2 blocks IN FRONT of center (z-2), clear of the
--- 1.5-block trigger radius. This prevents the item re-capture loop.
+--          K1                y+5   top vertex
+--       K6    K2             y+4   upper sides
+--       [portal] [portal]    y+3   event horizon fills here
+--       [portal]             y+2   event horizon
+--       K5    K3             y+2   lower sides
+--          K4                y+1   bottom vertex
+--          BASE              y+0   controller
 
--- Ring block offsets relative to the base block (excluding base itself)
-local RING_OFFSETS = {
-    {-1, 0, 0}, {1, 0, 0},                       -- bottom row (left, right of base)
-    {-1, 1, 0}, {1, 1, 0},                       -- row 1
-    {-1, 2, 0}, {1, 2, 0},                       -- row 2
-    {-1, 3, 0}, {1, 3, 0},                       -- row 3
-    {-1, 4, 0}, {0, 4, 0}, {1, 4, 0},            -- top row
+-- 6 Keystone positions (vertices of the hexagon), relative to base
+local KEYSTONE_OFFSETS = {
+    {0,  5, 0},   -- K1 top
+    {1,  4, 0},   -- K2 upper-right
+    {1,  2, 0},   -- K3 lower-right
+    {0,  1, 0},   -- K4 bottom
+    {-1, 2, 0},   -- K5 lower-left
+    {-1, 4, 0},   -- K6 upper-left
 }
 
 -- Portal opening offsets (where event horizon appears when linked)
 local PORTAL_OFFSETS = {
-    {0, 1, 0}, {0, 2, 0}, {0, 3, 0},
+    {0, 2, 0}, {0, 3, 0}, {0, 4, 0},
 }
 
--- The center of the ring (trigger zone) is 2 blocks above the base
+-- All gate blocks (keystones + spans) for cleanup/destruction
+local ALL_FRAME_OFFSETS = {}
+for _, off in ipairs(KEYSTONE_OFFSETS) do ALL_FRAME_OFFSETS[#ALL_FRAME_OFFSETS+1] = off end
+
+-- The center of the ring (trigger zone) is 3 blocks above the base
 local function get_center(base_pos)
-    return {x = base_pos.x, y = base_pos.y + 2, z = base_pos.z}
+    return {x = base_pos.x, y = base_pos.y + 3, z = base_pos.z}
 end
 
 -- Arrival point: 2 blocks in front of center, clear of trigger radius
@@ -389,6 +399,9 @@ local function get_arrival_pos(base_pos)
     local c = get_center(base_pos)
     return {x = c.x, y = c.y, z = c.z - 2}
 end
+
+-- Legacy alias for code that references RING_OFFSETS
+local RING_OFFSETS = ALL_FRAME_OFFSETS
 
 local function register_gate_at(pos)
     local address = make_address(pos)
@@ -461,6 +474,128 @@ local function unregister_gate_at(pos)
 end
 
 -- The gate formspec
+-- =============================================================================
+-- Dialing Sequence
+-- =============================================================================
+-- When a dial succeeds, keystones light up one at a time, each showing the
+-- color of the symbol being dialed. The color sequence IS the address.
+-- Per-tier timing controls drama: same-world is fast, cross-galaxy is ceremonial.
+
+-- Hash a string to a color index (1-12)
+local function hash_to_symbol(s)
+    local h = 0
+    for i = 1, #s do
+        h = (h * 31 + string.byte(s, i)) % 12
+    end
+    return h + 1  -- 1-based index into KEYSTONE_COLORS
+end
+
+-- Compute the symbol sequence (colors) for a destination address
+local function compute_dial_sequence(dest_address, tier)
+    local route = address_to_route(dest_address)
+    if not route then return {} end
+    local symbols = {}
+    if tier >= nexus.power.TIER.CROSS_GALAXY then
+        symbols[#symbols+1] = hash_to_symbol(route.galaxy or "x")
+    end
+    if tier >= nexus.power.TIER.SAME_GALAXY then
+        symbols[#symbols+1] = hash_to_symbol(route.world or "x")
+    end
+    -- Always include gate_id (split into symbols)
+    local gid = route.gate_id or "g0_0"
+    local half = math.floor(#gid / 2)
+    symbols[#symbols+1] = hash_to_symbol(gid:sub(1, half))
+    symbols[#symbols+1] = hash_to_symbol(gid:sub(half + 1))
+    if tier >= nexus.power.TIER.SAME_GALAXY then
+        symbols[#symbols+1] = hash_to_symbol((route.world or "x") .. "2")
+    end
+    if tier >= nexus.power.TIER.CROSS_GALAXY then
+        symbols[#symbols+1] = hash_to_symbol((route.galaxy or "x") .. "2")
+    end
+    -- Final lock symbol
+    symbols[#symbols+1] = hash_to_symbol(dest_address)
+    return symbols
+end
+
+-- Play the dialing sequence: light each keystone one at a time
+local function play_dialing_sequence(base_pos, symbols, tier, on_complete)
+    local num_symbols = #symbols
+    local per_symbol_time
+    if tier == nexus.power.TIER.CROSS_GALAXY then
+        per_symbol_time = DIAL_TIME.cross_galaxy
+    elseif tier == nexus.power.TIER.SAME_GALAXY then
+        per_symbol_time = DIAL_TIME.same_galaxy
+    else
+        per_symbol_time = DIAL_TIME.same_world
+    end
+
+    local function light_keystone(step)
+        if step > num_symbols then
+            -- All keystones lit — final burst then complete
+            if on_complete then on_complete() end
+            return
+        end
+
+        local color_idx = symbols[step]
+        local color = KEYSTONE_COLORS[color_idx] or "white"
+        -- Light the keystone at this position (step 1 = K1, step 2 = K2, etc.)
+        local ks_idx = ((step - 1) % 6) + 1
+        local off = KEYSTONE_OFFSETS[ks_idx]
+        local kp = {x = base_pos.x + off[1], y = base_pos.y + off[2], z = base_pos.z + off[3]}
+
+        if core.get_node(kp).name == KEYSTONE_OFF or is_keystone(core.get_node(kp).name) then
+            core.swap_node(kp, {name = keystone_lit_name(color)})
+        end
+
+        -- Particle burst at this keystone
+        core.add_particlespawner({
+            amount = 15,
+            time = 0.5,
+            minpos = {x = kp.x - 0.3, y = kp.y - 0.3, z = kp.z - 0.3},
+            maxpos = {x = kp.x + 0.3, y = kp.y + 0.3, z = kp.z + 0.3},
+            minvel = {x = -1, y = 1, z = -1},
+            maxvel = {x = 1, y = 3, z = 1},
+            minexptime = 0.5,
+            maxexptime = 1.0,
+            minsize = 1,
+            maxsize = 3,
+            texture = "nexus_keystone_lit_" .. color .. ".png",
+            glow = 14,
+        })
+
+        -- Dialing sound (rising pitch per step)
+        core.sound_play("nexus_gate_dial", {
+            pos = kp, max_hear_distance = 20, gain = 0.5,
+            pitch = 0.8 + (step / num_symbols) * 0.5,
+        })
+
+        -- Light the next keystone after the delay
+        core.after(per_symbol_time, function()
+            light_keystone(step + 1)
+        end)
+    end
+
+    -- Reset all keystones to off before starting
+    for _, off in ipairs(KEYSTONE_OFFSETS) do
+        local kp = {x = base_pos.x + off[1], y = base_pos.y + off[2], z = base_pos.z + off[3]}
+        if is_keystone(core.get_node(kp).name) then
+            core.swap_node(kp, {name = KEYSTONE_OFF})
+        end
+    end
+
+    light_keystone(1)
+end
+
+-- Reset all keystones to unlit (called when link closes)
+local function reset_keystones(base_pos)
+    for _, off in ipairs(KEYSTONE_OFFSETS) do
+        local kp = {x = base_pos.x + off[1], y = base_pos.y + off[2], z = base_pos.z + off[3]}
+        if is_keystone(core.get_node(kp).name) then
+            core.swap_node(kp, {name = KEYSTONE_OFF})
+        end
+    end
+end
+
 local function show_gate_formspec(pos, player)
     local pname = player:get_player_name()
     local meta = core.get_meta(pos)
@@ -636,42 +771,84 @@ core.register_node(GATE_NODE, {
     end,
 })
 
--- Ring frame blocks — form the stargate structure. Not obtainable normally.
-core.register_node(RING_NODE, {
-    description = "Stargate Ring Segment",
-    tiles = {"nexus_gate_ring.png"},
-    groups = {cracky = 3, not_in_creative_inventory = 1},
-    light_source = 4,
-    drop = "",  -- doesn't drop anything when broken
+-- =============================================================================
+-- Keystone Nodes (unlit + 12 color-lit variants)
+-- =============================================================================
+-- Each keystone is a dark stone block when unlit. When its symbol is dialed,
+-- it swaps to a lit color variant with light emission. The color sequence
+-- during dialing IS the address — players can recognize destinations by
+-- their color pattern.
 
-    on_destruct = function(pos)
-        -- If a ring block is destroyed, find and destroy the whole gate
-        for addr, data in pairs(local_gates) do
-            local base_pos = data.pos
-            for _, off in ipairs(RING_OFFSETS) do
-                local rp = {x = base_pos.x + off[1], y = base_pos.y + off[2], z = base_pos.z + off[3]}
-                if vector.equals(rp, pos) then
-                    -- This ring block belongs to this gate — remove everything
-                    remove_event_horizon(base_pos)
-                    -- Remove all ring blocks
-                    for _, off2 in ipairs(RING_OFFSETS) do
-                        local p = {x = base_pos.x + off2[1], y = base_pos.y + off2[2], z = base_pos.z + off2[3]}
-                        local node = core.get_node(p)
-                        if node.name == RING_NODE then
-                            core.remove_node(p)
-                        end
+local KEYSTONE_COLORS = {
+    "red", "orange", "yellow", "green", "cyan", "blue",
+    "violet", "magenta", "white", "pink", "lime", "amber",
+}
+
+local KEYSTONE_OFF = "nexus:keystone_off"
+
+-- Forward-declared destruct handler (defined after node registrations)
+local keystone_destruct_handler
+
+-- Generate lit keystone node names: nexus:keystone_lit_red, etc.
+local function keystone_lit_name(color)
+    return "nexus:keystone_lit_" .. color
+end
+
+-- Check if a node name is any keystone variant
+local function is_keystone(name)
+    if name == KEYSTONE_OFF then return true end
+    for _, color in ipairs(KEYSTONE_COLORS) do
+        if name == keystone_lit_name(color) then return true end
+    end
+    return false
+end
+
+-- Unlit keystone
+core.register_node(KEYSTONE_OFF, {
+    description = "Gate Keystone",
+    tiles = {"nexus_keystone_off.png"},
+    groups = {cracky = 3, not_in_creative_inventory = 1},
+    light_source = 2,
+    drop = "",
+    on_destruct = keystone_destruct_handler,
+})
+
+-- Lit keystones (one per color)
+for _, color in ipairs(KEYSTONE_COLORS) do
+    core.register_node(keystone_lit_name(color), {
+        description = "Gate Keystone (" .. color .. ")",
+        tiles = {"nexus_keystone_lit_" .. color .. ".png"},
+        groups = {cracky = 3, not_in_creative_inventory = 1},
+        light_source = 12,
+        drop = "",
+        on_destruct = keystone_destruct_handler,
+    })
+end
+
+-- Destruct handler: if any keystone is destroyed, remove the entire gate
+local function keystone_destruct_handler(pos)
+    for addr, data in pairs(local_gates) do
+        local base_pos = data.pos
+        for _, off in ipairs(KEYSTONE_OFFSETS) do
+            local kp = {x = base_pos.x + off[1], y = base_pos.y + off[2], z = base_pos.z + off[3]}
+            if vector.equals(kp, pos) then
+                remove_event_horizon(base_pos)
+                -- Remove all keystones
+                for _, off2 in ipairs(KEYSTONE_OFFSETS) do
+                    local p = {x = base_pos.x + off2[1], y = base_pos.y + off2[2], z = base_pos.z + off2[3]}
+                    if is_keystone(core.get_node(p).name) then
+                        core.remove_node(p)
                     end
-                    -- Remove the base
-                    local bnode = core.get_node(base_pos)
-                    if bnode.name == GATE_NODE then
-                        core.remove_node(base_pos)
-                    end
-                    return
                 end
+                -- Remove the base
+                if core.get_node(base_pos).name == GATE_NODE then
+                    core.remove_node(base_pos)
+                end
+                return
             end
         end
-    end,
-})
+    end
+end
 
 -- Event horizon — the glowing portal surface. Non-solid, ephemeral.
 core.register_node(HORIZON_NODE, {
@@ -778,14 +955,40 @@ core.register_on_player_receive_fields(function(player, formname, fields)
 
         nexus.gate.establish_link(address, dest, pname, function(ok, info)
             if ok then
-                linked_gates[address] = true
-                place_event_horizon(pos)
-                core.chat_send_player(pname, "[nexus] Wormhole established!")
-                core.sound_play("nexus_gate_open", {
-                    pos = pos, max_hear_distance = 30, gain = 0.8
-                })
-                -- Refresh formspec
-                show_gate_formspec(pos, player)
+                -- Determine tier and play dialing sequence
+                local route = address_to_route(dest)
+                local tier, tier_label = nexus.power.tier_for(
+                    GALAXY, WORLD,
+                    (route and route.galaxy) or GALAXY,
+                    (route and route.world) or WORLD)
+                local symbols = compute_dial_sequence(dest, tier)
+
+                core.chat_send_player(pname, "[nexus] Connection established — dialing " ..
+                    #symbols .. " symbols (" .. tier_label .. ")...")
+
+                play_dialing_sequence(pos, symbols, tier, function()
+                    -- Sequence complete — open the portal
+                    linked_gates[address] = true
+                    place_event_horizon(pos)
+                    core.chat_send_player(pname, "[nexus] Wormhole established!")
+                    core.sound_play("nexus_gate_open", {
+                        pos = pos, max_hear_distance = 30, gain = 0.8
+                    })
+                    -- Particle burst on portal open
+                    local center = get_center(pos)
+                    core.add_particlespawner({
+                        amount = 40, time = 0.5,
+                        minpos = {x=center.x-1, y=center.y-1, z=center.z-1},
+                        maxpos = {x=center.x+1, y=center.y+1, z=center.z+1},
+                        minvel = {x=-3, y=-3, z=-3},
+                        maxvel = {x=3, y=3, z=3},
+                        minexptime = 0.5, maxexptime = 1.5,
+                        minsize = 2, maxsize = 5,
+                        texture = "nexus_event_horizon.png",
+                        glow = 14,
+                    })
+                    show_gate_formspec(pos, player)
+                end)
             else
                 core.chat_send_player(pname, "[nexus] Dialing failed: " ..
                     tostring(info))
@@ -797,6 +1000,7 @@ core.register_on_player_receive_fields(function(player, formname, fields)
         nexus.gate.close_link(address, function(ok)
             linked_gates[address] = nil
             remove_event_horizon(pos)
+            reset_keystones(pos)
             if ok then
                 core.chat_send_player(pname, "[nexus] Wormhole closed.")
                 core.sound_play("nexus_gate_close", {
@@ -993,7 +1197,7 @@ end)
 -- Places a base block and all ring blocks. For quick testing.
 core.register_chatcommand("placegate", {
     params = "",
-    description = "Build a complete stargate at your position",
+    description = "Build a complete hexagonal stargate at your position",
     privs = {give = true},
     func = function(name)
         local player = core.get_player_by_name(name)
@@ -1002,38 +1206,40 @@ core.register_chatcommand("placegate", {
         local pos = vector.round(player:get_pos())
         pos.y = math.floor(pos.y)
 
-        -- Check area is clear
+        -- Check area is clear (keystones + portal)
         local blocked = false
-        for _, off in ipairs(RING_OFFSETS) do
+        for _, off in ipairs(KEYSTONE_OFFSETS) do
             local p = {x = pos.x + off[1], y = pos.y + off[2], z = pos.z + off[3]}
             if core.get_node(p).name ~= "air" then
                 blocked = true
                 break
             end
         end
-        for _, off in ipairs(PORTAL_OFFSETS) do
-            local p = {x = pos.x + off[1], y = pos.y + off[2], z = pos.z + off[3]}
-            if core.get_node(p).name ~= "air" then
-                blocked = true
-                break
+        if not blocked then
+            for _, off in ipairs(PORTAL_OFFSETS) do
+                local p = {x = pos.x + off[1], y = pos.y + off[2], z = pos.z + off[3]}
+                if core.get_node(p).name ~= "air" then
+                    blocked = true
+                    break
+                end
             end
         end
 
         if blocked then
-            return false, "Area not clear — need a 3x5 open space"
+            return false, "Area not clear — need open space for the hexagonal gate"
         end
 
-        -- Place ring blocks
-        for _, off in ipairs(RING_OFFSETS) do
+        -- Place keystone blocks at each vertex
+        for _, off in ipairs(KEYSTONE_OFFSETS) do
             local p = {x = pos.x + off[1], y = pos.y + off[2], z = pos.z + off[3]}
-            core.set_node(p, {name = RING_NODE})
+            core.set_node(p, {name = KEYSTONE_OFF})
         end
 
         -- Place base block (triggers on_construct → registration)
         core.set_node(pos, {name = GATE_NODE})
 
         local address = core.get_meta(pos):get_string("address")
-        return true, "Stargate built: " .. address
+        return true, "Hexagonal stargate built: " .. address
     end,
 })
 
@@ -1126,6 +1332,7 @@ core.register_chatcommand("closegate", {
             local gate_data = local_gates[nearest_addr]
             if gate_data then
                 remove_event_horizon(gate_data.pos)
+                reset_keystones(gate_data.pos)
                 core.sound_play("nexus_gate_close", {
                     pos = gate_data.center or gate_data.pos,
                     max_hear_distance = 30, gain = 0.8
@@ -1185,6 +1392,7 @@ core.register_globalstep(function(dtime)
                 -- Link just disappeared — remove event horizon
                 linked_gates[address] = nil
                 remove_event_horizon(gate_data.pos)
+                reset_keystones(gate_data.pos)
                 core.sound_play("nexus_gate_close", {
                     pos = gate_data.center, max_hear_distance = 30, gain = 0.6
                 })
