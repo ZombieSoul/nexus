@@ -11,5 +11,8 @@ if [ ! -f "$SECRET_FILE" ]; then
 fi
 export NEXUS_API_SECRET="$(cat "$SECRET_FILE")"
 
+# Use SQLite for state persistence (survives proxy restart)
+export NEXUS_STORAGE_BACKEND=sqlite
+
 cd proxy
 exec ./mt-multiserver-proxy

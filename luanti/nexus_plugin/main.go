@@ -46,8 +46,21 @@ func init() {
 	// Load config (env vars override defaults)
 	config.LoadFromEnv()
 
-	// Initialize subsystems
-	stateStore = NewMemoryStateStore(config.StateTTL)
+	// Initialize state store — SQLite survives proxy restart, memory does not
+	var err error
+	if config.StorageBackend == "sqlite" {
+		stateStore, err = NewSQLiteStateStore(config.StateTTL)
+		if err != nil {
+			log.Println("[nexus] WARNING: SQLite state store failed, falling back to memory:", err)
+			stateStore = NewMemoryStateStore(config.StateTTL)
+		} else {
+			log.Println("[nexus] using SQLite state store (survives restart)")
+		}
+	} else {
+		stateStore = NewMemoryStateStore(config.StateTTL)
+		log.Println("[nexus] using in-memory state store (lost on restart)")
+	}
+
 	transferMgr = NewTransferManager(stateStore, config)
 	galaxyReg = NewGalaxyRegistry()
 	gateSys = NewGateSystem()
@@ -347,6 +360,9 @@ func (c *Config) LoadFromEnv() {
 		c.APIBind = v
 	}
 	c.APISecret = os.Getenv("NEXUS_API_SECRET")
+	if v := os.Getenv("NEXUS_STORAGE_BACKEND"); v != "" {
+		c.StorageBackend = v
+	}
 }
 
 // DepartRequest is the body of POST /nexus/depart.
