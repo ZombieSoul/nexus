@@ -37,9 +37,17 @@ local DIAL_TIME = {
 --- @return table? route  {galaxy=, world=, gate_id=} or nil if invalid
 local function address_to_route(addr)
     if not addr then return nil end
+    -- Try 3-part format: galaxy:world:gate_id
     local galaxy, world, gate_id = addr:match("^([^:]+):([^:]+):([^:]+)$")
-    if not galaxy then return nil end
-    return { galaxy = galaxy, world = world, gate_id = gate_id }
+    if galaxy then
+        return { galaxy = galaxy, world = world, gate_id = gate_id }
+    end
+    -- Try legacy 2-part format: galaxy:gate_id (from before world decoupling)
+    local old_galaxy, old_gid = addr:match("^([^:]+):([^:]+)$")
+    if old_galaxy then
+        return { galaxy = old_galaxy, world = old_galaxy, gate_id = old_gid }
+    end
+    return nil
 end
 
 --- Format a structured route into an address string.
@@ -372,24 +380,26 @@ local SPAN_NODE = "nexus:gate_span"
 
 -- 6 Keystone positions (vertices of the hexagon), relative to base
 local KEYSTONE_OFFSETS = {
-    {0,  5, 0},   -- K1 top
-    {1,  4, 0},   -- K2 upper-right
-    {1,  2, 0},   -- K3 lower-right
-    {0,  1, 0},   -- K4 bottom
-    {-1, 2, 0},   -- K5 lower-left
-    {-1, 4, 0},   -- K6 upper-left
+    {0,  6, 0},   -- K1 top vertex
+    {2,  5, 0},   -- K2 upper-right
+    {2,  2, 0},   -- K3 lower-right
+    {0,  1, 0},   -- K4 bottom (sits above base block)
+    {-2, 2, 0},   -- K5 lower-left
+    {-2, 5, 0},   -- K6 upper-left
 }
 
 -- Portal opening offsets (where event horizon appears when linked)
 local PORTAL_OFFSETS = {
-    {0, 2, 0}, {0, 3, 0}, {0, 4, 0},
+    {0, 2, 0}, {0, 3, 0}, {0, 4, 0}, {0, 5, 0},
+    {1, 3, 0}, {1, 4, 0},
+    {-1, 3, 0}, {-1, 4, 0},
 }
 
 -- All gate blocks (keystones + spans) for cleanup/destruction
 local ALL_FRAME_OFFSETS = {}
 for _, off in ipairs(KEYSTONE_OFFSETS) do ALL_FRAME_OFFSETS[#ALL_FRAME_OFFSETS+1] = off end
 
--- The center of the ring (trigger zone) is 3 blocks above the base
+-- The center of the ring (trigger zone) is 3.5 blocks above the base
 local function get_center(base_pos)
     return {x = base_pos.x, y = base_pos.y + 3, z = base_pos.z}
 end
