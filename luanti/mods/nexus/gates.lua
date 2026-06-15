@@ -382,7 +382,7 @@ local SPAN_NODE = "nexus:gate_span"
 --          K4                y+1   bottom vertex
 --          BASE              y+0   controller
 
--- 6 Keystones at edge midpoints — symmetric on both sides
+-- 7 Keystones (one per dial symbol position — cross-galaxy needs all 7)
 local KEYSTONE_OFFSETS = {
     {-2, 1, 0},   -- K1 lower-left
     {2,  1, 0},   -- K2 lower-right
@@ -390,14 +390,15 @@ local KEYSTONE_OFFSETS = {
     {3,  3, 0},   -- K4 mid-right
     {-2, 5, 0},   -- K5 upper-left
     {2,  5, 0},   -- K6 upper-right
+    {0,  6, 0},   -- K7 top center
 }
 
 -- Span blocks fill ALL non-keystone, non-portal positions to form a solid ring
 local SPAN_OFFSETS = {
     {-1, 0, 0}, {1, 0, 0},              -- y+0: O C O
-    {-3, 2, 0}, {3, 2, 0},              -- y+2: O ... O (5-wide portal)
+    {-3, 2, 0}, {3, 2, 0},              -- y+2: O ... O
     {-3, 4, 0}, {3, 4, 0},              -- y+4: O ... O
-    {-1, 6, 0}, {0, 6, 0}, {1, 6, 0},  -- y+6: O O O (top cap)
+    {-1, 6, 0}, {1, 6, 0},              -- y+6: O X O (top: span, K7 keystone, span)
 }
 
 -- All frame blocks
@@ -581,7 +582,7 @@ local function play_dialing_sequence(base_pos, symbols, tier, on_complete)
         local color_idx = symbols[step]
         local color = KEYSTONE_COLORS[color_idx] or "white"
         -- Light the keystone at this position (step 1 = K1, step 2 = K2, etc.)
-        local ks_idx = ((step - 1) % 6) + 1
+        local ks_idx = ((step - 1) % 7) + 1  -- 7 keystones (K1-K7)
         local off = KEYSTONE_OFFSETS[ks_idx]
         local kp = {x = base_pos.x + off[1], y = base_pos.y + off[2], z = base_pos.z + off[3]}
 
