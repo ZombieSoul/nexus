@@ -332,7 +332,7 @@ core.register_node(GENERATOR_NODE, {
                             local gate_addr = gmeta:get_string("address")
                             if gate_addr ~= "" then
                                 local current = get_gate_power(gate_addr)
-                                local gate_max = 500
+                                local gate_max = 5000
                                 if current < gate_max and stored > 0 then
                                     local transfer = math.min(gate_max - current, stored, 10)
                                     set_gate_power(gate_addr, current + transfer)
