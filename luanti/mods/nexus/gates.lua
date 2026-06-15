@@ -495,6 +495,7 @@ local function unregister_gate_at(pos)
 
     local_gates[address] = nil
     linked_gates[address] = nil
+    gate_link_tiers[address] = nil
 
     -- Remove from mod_storage
     storage:set_string("gate_" .. address, "")
@@ -1094,6 +1095,7 @@ core.register_on_player_receive_fields(function(player, formname, fields)
     elseif fields.close then
         nexus.gate.close_link(address, function(ok)
             linked_gates[address] = nil
+    gate_link_tiers[address] = nil
             remove_event_horizon(pos)
             reset_keystones(pos)
             if ok then
@@ -1507,6 +1509,7 @@ core.register_chatcommand("closegate", {
 
         nexus.gate.close_link(nearest_addr, function()
             linked_gates[nearest_addr] = nil
+            gate_link_tiers[nearest_addr] = nil
             core.chat_send_player(name, "[nexus] Wormhole closed.")
             local gate_data = local_gates[nearest_addr]
             if gate_data then
@@ -1576,6 +1579,7 @@ core.register_globalstep(function(dtime)
             elseif not is_linked and was_linked then
                 -- Link just disappeared — remove event horizon
                 linked_gates[address] = nil
+    gate_link_tiers[address] = nil
                 remove_event_horizon(gate_data.pos)
                 reset_keystones(gate_data.pos)
                 core.sound_play("nexus_gate_close", {
@@ -1600,24 +1604,15 @@ function nexus.gate.get_local_gates()
     return local_gates
 end
 
---- Is this gate's wormhole currently open?
-function nexus.gate.is_linked(address)
-    return linked_gates[address] ~= nil
+--- Is this gate's wormhole currently open AND did this gate initiate the dial?
+--- Only the origin gate pays upkeep — the receiving gate doesn't.
+function nexus.gate.is_dial_origin(address)
+    return linked_gates[address] ~= nil and gate_link_tiers[address] ~= nil
 end
 
 --- Get the power tier of the active link for this gate (for upkeep cost)
 function nexus.gate.get_link_tier(address)
-    -- Query the proxy for the link info
-    -- For simplicity, determine from the remote address
-    for addr, _ in pairs(local_gates) do
-        if addr == address and linked_gates[addr] then
-            -- Get the link and determine tier
-            -- This is async, but for upkeep we can use the last known tier
-            -- Store the tier when dialing
-            return gate_link_tiers[address] or nexus.power.TIER.SAME_WORLD
-        end
-    end
-    return nexus.power.TIER.SAME_WORLD
+    return gate_link_tiers[address] or nexus.power.TIER.SAME_WORLD
 end
 
 core.log("action", "[nexus] gate system loaded")

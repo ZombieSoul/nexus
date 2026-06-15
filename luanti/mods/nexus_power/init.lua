@@ -370,9 +370,8 @@ core.register_globalstep(function(dtime)
 
     -- Iterate local gates that are linked
     for addr, data in pairs(nexus.gate.get_local_gates and nexus.gate.get_local_gates() or {}) do
-        -- Only drain if this gate is linked (wormhole open)
-        -- We check via the proxy link state
-        if nexus.gate.is_linked and nexus.gate.is_linked(addr) then
+        -- Only drain from the gate that INITIATED the dial (not the receiver)
+        if nexus.gate.is_dial_origin and nexus.gate.is_dial_origin(addr) then
             local power = get_gate_power(addr)
             -- Determine tier from the active link
             local tier = nexus.gate.get_link_tier and nexus.gate.get_link_tier(addr) or 1
