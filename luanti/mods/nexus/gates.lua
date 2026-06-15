@@ -382,27 +382,39 @@ local SPAN_NODE = "nexus:gate_span"
 --          K4                y+1   bottom vertex
 --          BASE              y+0   controller
 
--- 6 Keystone positions (vertices of the hexagon), relative to base
+-- 6 Keystones at the mid-points of the hexagon edges (3 pairs at different widths)
 local KEYSTONE_OFFSETS = {
-    {0,  6, 0},   -- K1 top vertex
+    {0,  6, 0},   -- K1 top center
     {2,  5, 0},   -- K2 upper-right
-    {2,  2, 0},   -- K3 lower-right
-    {0,  1, 0},   -- K4 bottom (sits above base block)
-    {-2, 2, 0},   -- K5 lower-left
-    {-2, 5, 0},   -- K6 upper-left
+    {-2, 5, 0},   -- K3 upper-left
+    {2,  1, 0},   -- K4 lower-right
+    {-2, 1, 0},   -- K5 lower-left
+    {0,  0, 0},   -- K6 is replaced by the base block
 }
 
--- Span blocks fill the gaps between keystones to form a solid ring
+-- Actually use the user's visual layout: 6 keystones at edge midpoints
+KEYSTONE_OFFSETS = {
+    {-2, 1, 0},   -- K1 lower-left
+    {2,  1, 0},   -- K2 lower-right
+    {-3, 3, 0},   -- K3 mid-left
+    {2,  3, 0},   -- K4 mid-right
+    {-2, 5, 0},   -- K5 upper-left
+    {2,  5, 0},   -- K6 upper-right
+}
+
+-- Span blocks fill ALL non-keystone, non-portal positions to form a solid ring
 local SPAN_OFFSETS = {
-    {1, 5, 0},          -- K1-K2 edge
-    {2, 3, 0}, {2, 4, 0},  -- K2-K3 edge
-    {1, 1, 0},          -- K3-K4 edge
-    {-1, 1, 0},         -- K4-K5 edge
-    {-2, 3, 0}, {-2, 4, 0}, -- K5-K6 edge
-    {-1, 5, 0},         -- K6-K1 edge
+    -- y+0: O C O (base at center, spans on sides)
+    {-1, 0, 0}, {1, 0, 0},
+    -- y+2: O A A A A O
+    {-3, 2, 0}, {2, 2, 0},
+    -- y+4: O A A A A O
+    {-3, 4, 0}, {2, 4, 0},
+    -- y+6: O X O → top cap (spans + center capstone)
+    {-1, 6, 0}, {0, 6, 0}, {1, 6, 0},
 }
 
--- All frame blocks (keystones + spans) for cleanup/registration
+-- All frame blocks
 local ALL_FRAME_OFFSETS = {}
 for _, off in ipairs(KEYSTONE_OFFSETS) do ALL_FRAME_OFFSETS[#ALL_FRAME_OFFSETS+1] = off end
 for _, off in ipairs(SPAN_OFFSETS) do ALL_FRAME_OFFSETS[#ALL_FRAME_OFFSETS+1] = off end
@@ -418,11 +430,18 @@ local function get_arrival_pos(base_pos)
     return {x = c.x, y = c.y, z = c.z - 2}
 end
 
--- Portal opening offsets (where event horizon appears when linked)
+-- Portal opening offsets (event horizon fills the interior)
 local PORTAL_OFFSETS = {
-    {0, 2, 0}, {0, 3, 0}, {0, 4, 0}, {0, 5, 0},
-    {1, 3, 0}, {1, 4, 0},
-    {-1, 3, 0}, {-1, 4, 0},
+    -- y+1: X A A A X
+    {-1, 1, 0}, {0, 1, 0}, {1, 1, 0},
+    -- y+2: O A A A A O
+    {-2, 2, 0}, {-1, 2, 0}, {0, 2, 0}, {1, 2, 0},
+    -- y+3: X A A A A X
+    {-2, 3, 0}, {-1, 3, 0}, {0, 3, 0}, {1, 3, 0},
+    -- y+4: O A A A A O
+    {-2, 4, 0}, {-1, 4, 0}, {0, 4, 0}, {1, 4, 0},
+    -- y+5: X A A A X
+    {-1, 5, 0}, {0, 5, 0}, {1, 5, 0},
 }
 
 -- Legacy alias
