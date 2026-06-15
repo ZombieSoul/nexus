@@ -1,95 +1,134 @@
 -- nexus_power/init.lua
 -- Tiered power system for nexus gates.
 --
--- Provides three tiers of ore → ingot → power fuel:
---   Resonite  (T1) — shallow, uncommon  → same-world gate power
---   Stellarite (T2) — deep, rare         → same-galaxy gate power
---   Voidium   (T3) — very deep, very rare → cross-galaxy gate power
+-- Progression design:
+--   T1 generator (Resonite)    → same-world travel is sustainable
+--                                interstellar is a struggle, intergalactic impossible
+--   T2 generator (Stellarite)  → interstellar becomes manageable
+--                                intergalactic requires long charge, can't sustain upkeep
+--   T3 generator (Voidium)     → intergalactic becomes sustainable, transitions to content
 --
--- Registers as a nexus.power provider so gates check/consume power.
--- Ore generation uses core.register_ore() — engine-level, works on
--- any Luanti game (host rock auto-detected).
+-- All values are configurable.
 
 local modpath = core.get_modpath(core.get_current_modname())
 local storage = core.get_mod_storage()
 
 -- =============================================================================
--- Configuration
+-- Configuration (all configurable via settings)
 -- =============================================================================
 
--- Which ores generate on THIS world? Set via nexus_power.ores config.
--- Examples:
---   nexus_power.ores = resonite                  (starting world)
---   nexus_power.ores = resonite,stellarite       (tier 1 destination)
---   nexus_power.ores = resonite,stellarite,voidium (deep/hazardous world)
--- If not set, defaults to resonite only (starting world).
-local ore_config = core.settings:get("nexus_power.ores") or "resonite"
-local world_ores = {}
-for ore in ore_config:gmatch("([%w_]+)") do
-    world_ores[ore] = true
-end
+local S = core.settings
+
+-- Gate capacity — how much power a gate can store
+local GATE_CAPACITY = tonumber(S:get("nexus_power.gate_capacity")) or 5000
+
+-- Dial costs — the "punch through" energy to establish a wormhole
+local DIAL_COST = {
+    [1] = tonumber(S:get("nexus_power.dial_cost_same_world"))   or 50,    -- trivial for T1
+    [2] = tonumber(S:get("nexus_power.dial_cost_same_galaxy"))  or 500,   -- needs T2 generator
+    [3] = tonumber(S:get("nexus_power.dial_cost_cross_galaxy")) or 5000,  -- needs T2 charged long, or T3
+}
+
+-- Upkeep per second while wormhole is open
+-- T1 generator can sustain same-world easily
+-- T2 generator can sustain interstellar but barely keeps up with intergalactic
+-- T3 generator sustains intergalactic comfortably
+local UPKEEP_COST = {
+    [1] = tonumber(S:get("nexus_power.upkeep_same_world"))   or 2,    -- T1 gen outputs 5/s, sustainable
+    [2] = tonumber(S:get("nexus_power.upkeep_same_galaxy"))  or 25,   -- T2 gen outputs 50/s, sustainable
+    [3] = tonumber(S:get("nexus_power.upkeep_cross_galaxy")) or 200,  -- T3 gen outputs 300/s, sustainable; T2 can't keep up
+}
+
+local UPKEEP_INTERVAL = tonumber(S:get("nexus_power.upkeep_interval")) or 5
+
+-- =============================================================================
+-- Ore / Fuel Tiers
+-- =============================================================================
 
 local TIERS = {
     {
         name = "resonite",
         display = "Resonite",
         color = "#2a8a8a",
-        tier = 1,  -- nexus.power.TIER.SAME_WORLD
-        -- Ore gen: underground, uncommon (same depth range on all worlds)
+        tier = 1,
         ore_y_min = -64,
         ore_y_max = -16,
-        ore_scarcity = 8 * 8 * 8,    -- 1 in 512
+        ore_scarcity = 8 * 8 * 8,
         ore_num_ores = 5,
         ore_size = 3,
-        -- Power: how much one ingot fuels
-        power_per_ingot = 10,
+        power_per_ingot = 100,     -- 1 ingot = 100 power
     },
     {
         name = "stellarite",
         display = "Stellarite",
         color = "#aa5aca",
-        tier = 2,  -- nexus.power.TIER.SAME_GALAXY
-        -- Ore gen: underground, rare (only on tier 1+ destination worlds)
+        tier = 2,
         ore_y_min = -64,
         ore_y_max = -16,
-        ore_scarcity = 10 * 10 * 10,  -- 1 in 1000
+        ore_scarcity = 10 * 10 * 10,
         ore_num_ores = 4,
         ore_size = 3,
-        power_per_ingot = 50,
+        power_per_ingot = 1000,    -- 1 ingot = 1000 power (10x T1)
     },
     {
         name = "voidium",
         display = "Voidium",
         color = "#4a4aaa",
-        tier = 3,  -- nexus.power.TIER.CROSS_GALAXY
-        -- Ore gen: deep underground, very rare (only on dangerous worlds)
+        tier = 3,
         ore_y_min = -64,
         ore_y_max = -16,
-        ore_scarcity = 12 * 12 * 12,  -- 1 in 1728
+        ore_scarcity = 12 * 12 * 12,
         ore_num_ores = 3,
         ore_size = 2,
-        power_per_ingot = 500,
+        power_per_ingot = 10000,   -- 1 ingot = 10000 power (10x T2)
     },
 }
 
--- Cost per dial, per tier (how much power a trip consumes)
--- Configurable via settings. Defaults: significant / huge / insane.
-local DIAL_COST = {
-    [1] = tonumber(core.settings:get("nexus_power.dial_cost_same_world")) or 50,
-    [2] = tonumber(core.settings:get("nexus_power.dial_cost_same_galaxy")) or 300,
-    [3] = tonumber(core.settings:get("nexus_power.dial_cost_cross_galaxy")) or 2000,
-}
+-- =============================================================================
+-- Generator Tiers
+-- =============================================================================
 
--- Upkeep per second while wormhole is open, per tier
--- Configurable. Defaults keep a gate open for a few minutes on a full charge.
-local UPKEEP_COST = {
-    [1] = tonumber(core.settings:get("nexus_power.upkeep_same_world")) or 0.5,   -- 100 power = ~3 min
-    [2] = tonumber(core.settings:get("nexus_power.upkeep_same_galaxy")) or 2.0,  -- 100 power = ~50 sec
-    [3] = tonumber(core.settings:get("nexus_power.upkeep_cross_galaxy")) or 10.0, -- 100 power = ~10 sec
+local GENERATORS = {
+    {
+        name = "generator_t1",
+        display = "Resonite Generator",
+        node = "nexus_power:generator_t1",
+        texture = "nexus_generator.png",
+        tier = 1,
+        -- Only accepts T1 fuel
+        accepts_fuel = {resonite = true},
+        -- Transfer rate to gate (power per cycle)
+        transfer_rate = 5,         -- 5 power per 2s tick = 2.5/s
+        -- Internal buffer
+        buffer_capacity = 500,
+        -- Fuel burn rate (how often it processes an ingot, in seconds)
+        burn_interval = 4,
+    },
+    {
+        name = "generator_t2",
+        display = "Stellarite Generator",
+        node = "nexus_power:generator_t2",
+        texture = "nexus_stellarite_block.png",  -- reuse for now
+        tier = 2,
+        -- Accepts T1 and T2 fuel
+        accepts_fuel = {resonite = true, stellarite = true},
+        transfer_rate = 50,        -- 50 power per 2s = 25/s
+        buffer_capacity = 5000,
+        burn_interval = 3,
+    },
+    {
+        name = "generator_t3",
+        display = "Voidium Generator",
+        node = "nexus_power:generator_t3",
+        texture = "nexus_voidium_block.png",  -- reuse for now
+        tier = 3,
+        -- Accepts all fuel tiers
+        accepts_fuel = {resonite = true, stellarite = true, voidium = true},
+        transfer_rate = 300,       -- 300 power per 2s = 150/s
+        buffer_capacity = 50000,
+        burn_interval = 2,
+    },
 }
-
--- How often (seconds) the upkeep drain runs
-local UPKEEP_INTERVAL = 5
 
 -- =============================================================================
 -- Node / Item Registration
@@ -103,19 +142,13 @@ for _, t in ipairs(TIERS) do
         groups = {cracky = 3, pickaxey = 2, building_block = 1, material_stone = 1},
         drop = "nexus_power:" .. t.name,
         sounds = core.node_sound_stone_defaults and core.node_sound_stone_defaults() or {},
-        _mcl_fortune_drop = { -- Mineclonia fortune enchant support
-            discrete_uniform = {
-                min = 1,
-                max = 1,
-            },
-        },
         _mcl_silk_touch_drop = true,
     })
 
-    -- Raw ore item (what you get from mining)
+    -- Raw ore item
     core.register_craftitem(":nexus_power:" .. t.name, {
         description = "Raw " .. t.display,
-        inventory_image = "nexus_" .. t.name .. "_ingot.png",  -- reuse ingot texture for now
+        inventory_image = "nexus_" .. t.name .. "_ingot.png",
         groups = {craftitem = 1},
     })
 
@@ -126,7 +159,7 @@ for _, t in ipairs(TIERS) do
         groups = {craftitem = 1},
     })
 
-    -- Storage block (9 ingots)
+    -- Storage block
     core.register_node(":nexus_power:" .. t.name .. "_block", {
         description = t.display .. " Block",
         tiles = {"nexus_" .. t.name .. "_block.png"},
@@ -139,7 +172,6 @@ end
 -- Crafting Recipes
 -- =============================================================================
 
--- Smelting: raw ore → ingot (uses Mineclonia furnace if available, else cooking)
 for _, t in ipairs(TIERS) do
     core.register_craft({
         type = "cooking",
@@ -147,7 +179,6 @@ for _, t in ipairs(TIERS) do
         recipe = "nexus_power:" .. t.name,
         cooktime = 10,
     })
-    -- Block = 9 ingots
     core.register_craft({
         output = "nexus_power:" .. t.name .. "_block",
         recipe = {
@@ -156,28 +187,56 @@ for _, t in ipairs(TIERS) do
             {"nexus_power:" .. t.name .. "_ingot", "nexus_power:" .. t.name .. "_ingot", "nexus_power:" .. t.name .. "_ingot"},
         },
     })
-    -- Ingot from block
     core.register_craft({
         output = "nexus_power:" .. t.name .. "_ingot 9",
         recipe = {{"nexus_power:" .. t.name .. "_block"}},
     })
 end
 
+-- Generator crafting (tiered)
+core.register_craft({
+    output = "nexus_power:generator_t1",
+    recipe = {
+        {"mcl_core:iron_ingot", "nexus_power:resonite_ingot", "mcl_core:iron_ingot"},
+        {"mcl_core:iron_ingot", "mcl_core:furnace", "mcl_core:iron_ingot"},
+        {"mcl_core:iron_ingot", "nexus_power:resonite_block", "mcl_core:iron_ingot"},
+    },
+})
+core.register_craft({
+    output = "nexus_power:generator_t2",
+    recipe = {
+        {"nexus_power:resonite_block", "nexus_power:stellarite_ingot", "nexus_power:resonite_block"},
+        {"nexus_power:generator_t1", "nexus_power:stellarite_block", "nexus_power:generator_t1"},
+        {"nexus_power:resonite_block", "nexus_power:stellarite_ingot", "nexus_power:resonite_block"},
+    },
+})
+core.register_craft({
+    output = "nexus_power:generator_t3",
+    recipe = {
+        {"nexus_power:stellarite_block", "nexus_power:voidium_ingot", "nexus_power:stellarite_block"},
+        {"nexus_power:generator_t2", "nexus_power:voidium_block", "nexus_power:generator_t2"},
+        {"nexus_power:stellarite_block", "nexus_power:voidium_ingot", "nexus_power:stellarite_block"},
+    },
+})
+
 -- =============================================================================
--- Ore Generation (engine-level: core.register_ore)
+-- Ore Generation
 -- =============================================================================
 
--- Detect host rock based on what nodes the current game has
+local ore_config = S:get("nexus_power.ores") or "resonite"
+local world_ores = {}
+for ore in ore_config:gmatch("([%w_]+)") do
+    world_ores[ore] = true
+end
+
 local function get_stone_types()
     local stones = {}
-    -- Mineclonia uses mcl_core:stone and mcl_deepslate:deepslate
     if core.registered_nodes["mcl_core:stone"] then
         table.insert(stones, "mcl_core:stone")
     end
     if core.registered_nodes["mcl_deepslate:deepslate"] then
         table.insert(stones, "mcl_deepslate:deepslate")
     end
-    -- Fallback: mapgen_stone (engine default)
     if #stones == 0 then
         table.insert(stones, "mapgen_stone")
     end
@@ -187,12 +246,10 @@ end
 local host_rocks = get_stone_types()
 
 for _, t in ipairs(TIERS) do
-    -- Only register ores that this world is configured for
     if not world_ores[t.name] then
         core.log("action", "[nexus_power] " .. t.display ..
-            " ore NOT generated on this world (not in nexus_power.ores)")
+            " ore NOT generated on this world")
     else
-        -- Register in each host rock type
         for _, rock in ipairs(host_rocks) do
             core.register_ore({
                 ore_type = "scatter",
@@ -207,156 +264,153 @@ for _, t in ipairs(TIERS) do
             })
         end
         core.log("action", "[nexus_power] " .. t.display ..
-            " ore registered in: " ..
-            table.concat(host_rocks, ",") ..
-            " (y " .. t.ore_y_min .. " to " .. t.ore_y_max .. ")")
+            " ore registered in: " .. table.concat(host_rocks, ","))
     end
 end
 
 -- =============================================================================
--- Power Storage (per-gate)
+-- Power Storage
 -- =============================================================================
--- Gate power is stored in the gate BASE node's metadata.
--- The generator block charges nearby gates.
 
-local CHARGE_RADIUS = 5  -- generator charges gates within this many blocks
-
--- Get the power stored in a gate
 local function get_gate_power(gate_address)
     return storage:get_int("power_" .. gate_address)
 end
 
--- Set the power stored in a gate
 local function set_gate_power(gate_address, amount)
-    storage:set_int("power_" .. gate_address, amount)
+    storage:set_int("power_" .. gate_address, math.max(0, math.floor(amount)))
 end
 
 -- =============================================================================
--- Generator Block
+-- Generator Blocks (3 tiers)
 -- =============================================================================
 
-local GENERATOR_NODE = "nexus_power:generator"
+local CHARGE_RADIUS = tonumber(S:get("nexus_power.charge_radius")) or 5
 
--- Generator formspec
-local function show_generator_formspec(pos)
+local function show_generator_formspec(pos, gen_def)
     local meta = core.get_meta(pos)
-    local fuel = meta:get_string("fuel_type") or ""
     local stored = meta:get_int("stored_power") or 0
-
-    local formspec = table.concat({
+    local parts = {
         "formspec_version[4]",
         "size[10,8]",
         "no_prepend[]",
         "bgcolor[#1A1A2A;true]",
-        "label[0.5,0.5;Resonance Power Generator]",
+        "label[0.5,0.5;" .. gen_def.display .. "]",
         "label[0.5,1.5;Fuel slot:]",
         "listcolors[#222233;#333355;#000000]",
         string.format("list[nodemeta:%d,%d,%d;fuel;2,1.3;1,1;]", pos.x, pos.y, pos.z),
-        string.format("label[4,1.7;Stored power: %d]", stored),
-        "label[4,2.2;Insert ingots to generate gate power]",
+        string.format("label[4,1.5;Buffer: %d / %d]", stored, gen_def.buffer_capacity),
+        string.format("label[4,2.0;Transfer rate: %d/cycle]", gen_def.transfer_rate),
+        string.format("label[4,2.5;Accepts: %s fuel]", gen_def.tier == 1 and "Resonite" or
+            gen_def.tier == 2 and "Resonite/Stellarite" or "All tiers"),
         string.format("list[current_player;main;1,4;8,4;]"),
         string.format("listring[nodemeta:%d,%d,%d;fuel]", pos.x, pos.y, pos.z),
         "listring[current_player;main]",
-    }, "\n")
-    return formspec
+    }
+    return table.concat(parts, "\n")
 end
 
-core.register_node(GENERATOR_NODE, {
-    description = "Resonance Power Generator",
-    tiles = {"nexus_generator.png"},
-    groups = {cracky = 2, pickaxey = 1, material_stone = 1},
-    light_source = 6,
-    sounds = core.node_sound_metal_defaults and core.node_sound_metal_defaults()
-        or (core.node_sound_stone_defaults and core.node_sound_stone_defaults() or {}),
+-- Build a lookup: fuel item name → generator tiers that accept it + power value
+local fuel_lookup = {}
+for _, t in ipairs(TIERS) do
+    local ingot_name = "nexus_power:" .. t.name .. "_ingot"
+    fuel_lookup[ingot_name] = {power = t.power_per_ingot, min_gen_tier = t.tier}
+end
 
-    on_construct = function(pos)
-        local meta = core.get_meta(pos)
-        local inv = meta:get_inventory()
-        inv:set_size("fuel", 1)
-        meta:set_int("stored_power", 0)
-        meta:set_string("infotext", "Resonance Power Generator")
-        local timer = core.get_node_timer(pos)
-        timer:start(3.0)
-    end,
+for _, gen in ipairs(GENERATORS) do
+    local def = gen  -- capture for closures
 
-    on_rightclick = function(pos, node, player, itemstack, pointed_thing)
-        core.show_formspec(player:get_player_name(), "nexus_power:generator",
-            show_generator_formspec(pos))
-    end,
+    core.register_node(":" .. def.node, {
+        description = def.display,
+        tiles = {def.texture},
+        groups = {cracky = 2, pickaxey = 1, material_stone = 1},
+        light_source = 4 + def.tier * 2,
+        sounds = core.node_sound_metal_defaults and core.node_sound_metal_defaults()
+            or (core.node_sound_stone_defaults and core.node_sound_stone_defaults() or {}),
 
-    allow_metadata_inventory_put = function(pos, listname, index, stack, player)
-        -- Only accept our ingots as fuel
-        for _, t in ipairs(TIERS) do
-            if stack:get_name() == "nexus_power:" .. t.name .. "_ingot" then
+        on_construct = function(pos)
+            local meta = core.get_meta(pos)
+            local inv = meta:get_inventory()
+            inv:set_size("fuel", 1)
+            meta:set_int("stored_power", 0)
+            meta:set_string("infotext", def.display .. " (0 power)")
+            local timer = core.get_node_timer(pos)
+            timer:start(def.burn_interval)
+        end,
+
+        on_rightclick = function(pos, node, player, itemstack, pointed_thing)
+            core.show_formspec(player:get_player_name(), "nexus_power:generator",
+                show_generator_formspec(pos, def))
+        end,
+
+        allow_metadata_inventory_put = function(pos, listname, index, stack, player)
+            -- Only accept fuel this generator tier can use
+            local fuel_info = fuel_lookup[stack:get_name()]
+            if fuel_info and fuel_info.min_gen_tier <= def.tier then
                 return stack:get_count()
             end
-        end
-        return 0
-    end,
+            return 0
+        end,
 
-    allow_metadata_inventory_take = function(pos, listname, index, stack, player)
-        return stack:get_count()
-    end,
+        allow_metadata_inventory_take = function(pos, listname, index, stack, player)
+            return stack:get_count()
+        end,
 
-    on_timer = function(pos, elapsed)
-        local meta = core.get_meta(pos)
-        local inv = meta:get_inventory()
-        local fuel_stack = inv:get_stack("fuel", 1)
-        local stored = meta:get_int("stored_power") or 0
-        local max_store = 1000
+        on_timer = function(pos, elapsed)
+            local meta = core.get_meta(pos)
+            local inv = meta:get_inventory()
+            local fuel_stack = inv:get_stack("fuel", 1)
+            local stored = meta:get_int("stored_power") or 0
 
-        -- If there's fuel and we have storage space, burn it
-        if not fuel_stack:is_empty() and stored < max_store then
-            local fuel_name = fuel_stack:get_name()
-            for _, t in ipairs(TIERS) do
-                if fuel_name == "nexus_power:" .. t.name .. "_ingot" then
-                    stored = stored + t.power_per_ingot
-                    if stored > max_store then stored = max_store end
+            -- Burn fuel if there's room
+            if not fuel_stack:is_empty() and stored < def.buffer_capacity then
+                local fuel_info = fuel_lookup[fuel_stack:get_name()]
+                if fuel_info and fuel_info.min_gen_tier <= def.tier then
+                    stored = stored + fuel_info.power
+                    if stored > def.buffer_capacity then
+                        stored = def.buffer_capacity
+                    end
                     meta:set_int("stored_power", stored)
                     fuel_stack:take_item(1)
                     inv:set_stack("fuel", 1, fuel_stack)
-                    break
                 end
             end
-        end
 
-        -- Distribute power to nearby gates
-        if stored > 0 then
-            for x = -CHARGE_RADIUS, CHARGE_RADIUS do
-                for y = -CHARGE_RADIUS, CHARGE_RADIUS do
-                    for z = -CHARGE_RADIUS, CHARGE_RADIUS do
-                        local gpos = {x = pos.x + x, y = pos.y + y, z = pos.z + z}
-                        local gnode = core.get_node(gpos)
-                        if gnode.name == "nexus:gate_base" then
-                            local gmeta = core.get_meta(gpos)
-                            local gate_addr = gmeta:get_string("address")
-                            if gate_addr ~= "" then
-                                local current = get_gate_power(gate_addr)
-                                local gate_max = 5000
-                                if current < gate_max and stored > 0 then
-                                    local transfer = math.min(gate_max - current, stored, 10)
-                                    set_gate_power(gate_addr, current + transfer)
-                                    stored = stored - transfer
-                                    meta:set_int("stored_power", stored)
+            -- Transfer power to nearby gates
+            if stored > 0 then
+                for x = -CHARGE_RADIUS, CHARGE_RADIUS do
+                    for y = -CHARGE_RADIUS, CHARGE_RADIUS do
+                        for z = -CHARGE_RADIUS, CHARGE_RADIUS do
+                            local gpos = {x = pos.x + x, y = pos.y + y, z = pos.z + z}
+                            local gnode = core.get_node(gpos)
+                            if gnode.name == "nexus:gate_base" then
+                                local gmeta = core.get_meta(gpos)
+                                local gate_addr = gmeta:get_string("address")
+                                if gate_addr ~= "" then
+                                    local current = get_gate_power(gate_addr)
+                                    if current < GATE_CAPACITY and stored > 0 then
+                                        local transfer = math.min(
+                                            GATE_CAPACITY - current, stored, def.transfer_rate)
+                                        set_gate_power(gate_addr, current + transfer)
+                                        stored = stored - transfer
+                                        meta:set_int("stored_power", stored)
+                                    end
                                 end
                             end
                         end
                     end
                 end
             end
-        end
 
-        meta:set_string("infotext", "Resonance Power Generator (" .. stored .. " power)")
-        return true  -- keep timer running
-    end,
-})
+            meta:set_string("infotext", def.display .. " (" .. stored .. " buffer)")
+            return true
+        end,
+    })
+end
 
 -- =============================================================================
 -- Upkeep: drain power from open wormholes, auto-close when depleted
 -- =============================================================================
 
--- Track which gates are currently linked and their tier, so we can drain upkeep.
--- This is populated by checking linked_gates from the gates module.
 local upkeep_timer = 0
 
 core.register_globalstep(function(dtime)
@@ -365,26 +419,20 @@ core.register_globalstep(function(dtime)
     local elapsed = upkeep_timer
     upkeep_timer = 0
 
-    -- Check if gates module is loaded
     if not nexus.gate then return end
 
-    -- Iterate local gates that are linked
     for addr, data in pairs(nexus.gate.get_local_gates and nexus.gate.get_local_gates() or {}) do
-        -- Only drain from the gate that INITIATED the dial (not the receiver)
         if nexus.gate.is_dial_origin and nexus.gate.is_dial_origin(addr) then
             local power = get_gate_power(addr)
-            -- Determine tier from the active link
             local tier = nexus.gate.get_link_tier and nexus.gate.get_link_tier(addr) or 1
-            local drain = (UPKEEP_COST[tier] or 1.0) * elapsed
+            local drain = (UPKEEP_COST[tier] or 1) * elapsed
 
             if power <= drain then
-                -- Power depleted — auto-close the wormhole
                 set_gate_power(addr, 0)
                 nexus.gate.close_link(addr, function()
                     core.log("action", "[nexus_power] gate " .. addr ..
                         " power depleted — wormhole collapsed")
                 end)
-                -- Notify nearby players
                 if data and data.center then
                     core.chat_send_all("[nexus] Wormhole at " .. addr ..
                         " collapsed — power depleted!")
@@ -407,14 +455,12 @@ nexus.power.register_provider({
     name = "nexus_power",
 
     check = function(gate_address, tier)
-        -- Can this gate afford a trip at this tier?
         local cost = DIAL_COST[tier] or 999
         local available = get_gate_power(gate_address)
         return available >= cost
     end,
 
     consume = function(gate_address, tier)
-        -- Consume power for a trip. Return false if insufficient.
         local cost = DIAL_COST[tier] or 999
         local available = get_gate_power(gate_address)
         if available < cost then
@@ -437,7 +483,6 @@ core.register_chatcommand("gatepower", {
         local player = core.get_player_by_name(name)
         if not player then return false end
         local ppos = player:get_pos()
-        local found = false
         for x = -3, 3 do
             for y = -2, 6 do
                 for z = -3, 3 do
@@ -445,17 +490,14 @@ core.register_chatcommand("gatepower", {
                     if core.get_node(pos).name == "nexus:gate_base" then
                         local addr = core.get_meta(pos):get_string("address")
                         local power = get_gate_power(addr)
-                        local cost1 = DIAL_COST[1] or "?"
-                        local cost2 = DIAL_COST[2] or "?"
-                        local cost3 = DIAL_COST[3] or "?"
-                        local up1 = UPKEEP_COST[1] or "?"
-                        local up2 = UPKEEP_COST[2] or "?"
-                        local up3 = UPKEEP_COST[3] or "?"
                         return true, "Gate " .. addr .. " — power: " .. power ..
-                            "\n  Dial costs:" ..
-                            "\n    Same-world: " .. cost1 .. " (upkeep " .. up1 .. "/s)" ..
-                            "\n    Same-galaxy: " .. cost2 .. " (upkeep " .. up2 .. "/s)" ..
-                            "\n    Cross-galaxy: " .. cost3 .. " (upkeep " .. up3 .. "/s)"
+                            " / " .. GATE_CAPACITY ..
+                            "\n  Dial: same-world=" .. DIAL_COST[1] ..
+                            " same-galaxy=" .. DIAL_COST[2] ..
+                            " cross-galaxy=" .. DIAL_COST[3] ..
+                            "\n  Upkeep: same-world=" .. UPKEEP_COST[1] .. "/s" ..
+                            " same-galaxy=" .. UPKEEP_COST[2] .. "/s" ..
+                            " cross-galaxy=" .. UPKEEP_COST[3] .. "/s"
                     end
                 end
             end
@@ -482,7 +524,7 @@ core.register_chatcommand("givepower", {
                         local current = get_gate_power(addr)
                         set_gate_power(addr, current + amount)
                         return true, "Added " .. amount .. " power to gate " .. addr ..
-                            " (now " .. (current + amount) .. ")"
+                            " (now " .. (current + amount) .. " / " .. GATE_CAPACITY .. ")"
                     end
                 end
             end
@@ -491,4 +533,6 @@ core.register_chatcommand("givepower", {
     end,
 })
 
-core.log("action", "[nexus_power] loaded — 3 ore tiers, generator, registered as nexus.power provider")
+core.log("action", "[nexus_power] loaded — 3 ore tiers, 3 generators, registered as nexus.power provider")
+core.log("action", "[nexus_power] dial costs: " .. DIAL_COST[1] .. "/" .. DIAL_COST[2] .. "/" .. DIAL_COST[3])
+core.log("action", "[nexus_power] upkeep/s: " .. UPKEEP_COST[1] .. "/" .. UPKEEP_COST[2] .. "/" .. UPKEEP_COST[3])
