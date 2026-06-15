@@ -689,11 +689,9 @@ core.register_node(HORIZON_NODE, {
     diggable = false,
     drop = "",
     post_effect_color = {a = 120, r = 30, g = 80, b = 200},  -- bluish tint when inside
-    -- Prevent placement by players — only the gate system places this
-    on_construct = function(pos)
-        -- If somehow placed manually, remove it
-        core.remove_node(pos)
-    end,
+    -- NOTE: no on_construct that removes the node — that was the bug.
+    -- The node is already restricted via groups (not_in_creative_inventory,
+    -- diggable=false) and only placed by the gate system via set_node.
 })
 
 -- Re-register gates on server restart (LBM fires for loaded nodes)
@@ -825,8 +823,12 @@ core.register_globalstep(function(dtime)
 
     for address, gate_data in pairs(local_gates) do
         if linked_gates[address] then
-            local pos = gate_data.center or gate_data.pos
-            local objects = core.get_objects_inside_radius(pos, 1.5)
+            -- Check at feet level (y+1) where the player walks through the opening.
+            -- The center at y+2 is too high — standing on the base block puts feet at y+1,
+            -- which is 1 block below center and barely within the old 1.5 radius.
+            local trigger_pos = vector.new(gate_data.pos)
+            trigger_pos.y = trigger_pos.y + 1  -- feet level at the portal opening
+            local objects = core.get_objects_inside_radius(trigger_pos, 1.5)
             for _, obj in ipairs(objects) do
                 if obj:is_player() then
                     nexus.gate.travel_player(obj, address)
