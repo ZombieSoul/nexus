@@ -97,6 +97,9 @@ local linked_gates = {}
 -- from placing the event horizon before the sequence completes)
 local dialing_in_progress = {}
 
+-- Track the tier of each active link (for upkeep cost calculation)
+local gate_link_tiers = {}
+
 -- Arrival cooldown to prevent immediate bounce-back (pname → expiry time)
 local arrival_cooldown = {}
 
@@ -262,12 +265,7 @@ function nexus.gate.travel_player(player, gate_address)
                 return
             end
 
-            -- Consume power for this trip
-            if not nexus.power.consume(gate_address, tier) then
-                core.chat_send_player(pname, "[nexus] Power draw failed. Try again.")
-                return
-            end
-
+            -- Consume power at dial time now, not walk-through
             nexus.gate.get_info(link.remote_address, function(info)
                 if not info or not info.gate then
                     core.chat_send_player(pname, "[nexus] Destination gate lost.")
@@ -295,12 +293,7 @@ function nexus.gate.travel_player(player, gate_address)
             -- different galaxy = intergalactic — mechanism is the same,
             -- power cost differentiation comes with the energy system)
 
-            -- Consume power for this trip
-            if not nexus.power.consume(gate_address, tier) then
-                core.chat_send_player(pname, "[nexus] Power draw failed. Try again.")
-                return
-            end
-
+            -- Consume power at dial time now, not walk-through
             nexus.travel(player, remote_world or link.remote_galaxy, {
                 arrival_gate = link.remote_address,
                 departure_gate = gate_address,
@@ -1055,6 +1048,11 @@ core.register_on_player_receive_fields(function(player, formname, fields)
                     (route and route.world) or WORLD)
                 local symbols = compute_dial_sequence(dest, tier)
 
+                -- Consume dial cost power NOW (not on walk-through)
+                nexus.power.consume(address, tier)
+                -- Track the tier for upkeep
+                gate_link_tiers[address] = tier
+
                 core.chat_send_player(pname, "[nexus] Connection established — dialing " ..
                     #symbols .. " symbols (" .. tier_label .. ")...")
 
@@ -1397,6 +1395,9 @@ core.register_chatcommand("dial", {
         nexus.gate.establish_link(nearest_addr, dest, name, function(ok, info)
             if ok then
                 linked_gates[nearest_addr] = true
+                -- Consume dial cost and track tier for upkeep
+                nexus.power.consume(nearest_addr, tier)
+                gate_link_tiers[nearest_addr] = tier
                 local gate_data = local_gates[nearest_addr]
                 if gate_data then
                     place_event_horizon(gate_data.pos)
@@ -1589,5 +1590,34 @@ end)
 core.register_on_leaveplayer(function(player)
     arrival_cooldown[player:get_player_name()] = nil
 end)
+
+-- =============================================================================
+-- Public API for nexus_power (upkeep support)
+-- =============================================================================
+
+--- Return all local gates (address → gate_data) for upkeep iteration
+function nexus.gate.get_local_gates()
+    return local_gates
+end
+
+--- Is this gate's wormhole currently open?
+function nexus.gate.is_linked(address)
+    return linked_gates[address] ~= nil
+end
+
+--- Get the power tier of the active link for this gate (for upkeep cost)
+function nexus.gate.get_link_tier(address)
+    -- Query the proxy for the link info
+    -- For simplicity, determine from the remote address
+    for addr, _ in pairs(local_gates) do
+        if addr == address and linked_gates[addr] then
+            -- Get the link and determine tier
+            -- This is async, but for upkeep we can use the last known tier
+            -- Store the tier when dialing
+            return gate_link_tiers[address] or nexus.power.TIER.SAME_WORLD
+        end
+    end
+    return nexus.power.TIER.SAME_WORLD
+end
 
 core.log("action", "[nexus] gate system loaded")

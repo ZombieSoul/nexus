@@ -73,11 +73,23 @@ local TIERS = {
 }
 
 -- Cost per dial, per tier (how much power a trip consumes)
+-- Configurable via settings. Defaults: significant / huge / insane.
 local DIAL_COST = {
-    [1] = 5,    -- same-world: 5 power
-    [2] = 30,   -- same-galaxy: 30 power
-    [3] = 300,  -- cross-galaxy: 300 power
+    [1] = tonumber(core.settings:get("nexus_power.dial_cost_same_world")) or 50,
+    [2] = tonumber(core.settings:get("nexus_power.dial_cost_same_galaxy")) or 300,
+    [3] = tonumber(core.settings:get("nexus_power.dial_cost_cross_galaxy")) or 2000,
 }
+
+-- Upkeep per second while wormhole is open, per tier
+-- Configurable. Defaults keep a gate open for a few minutes on a full charge.
+local UPKEEP_COST = {
+    [1] = tonumber(core.settings:get("nexus_power.upkeep_same_world")) or 0.5,   -- 100 power = ~3 min
+    [2] = tonumber(core.settings:get("nexus_power.upkeep_same_galaxy")) or 2.0,  -- 100 power = ~50 sec
+    [3] = tonumber(core.settings:get("nexus_power.upkeep_cross_galaxy")) or 10.0, -- 100 power = ~10 sec
+}
+
+-- How often (seconds) the upkeep drain runs
+local UPKEEP_INTERVAL = 5
 
 -- =============================================================================
 -- Node / Item Registration
@@ -340,6 +352,55 @@ core.register_node(GENERATOR_NODE, {
 })
 
 -- =============================================================================
+-- Upkeep: drain power from open wormholes, auto-close when depleted
+-- =============================================================================
+
+-- Track which gates are currently linked and their tier, so we can drain upkeep.
+-- This is populated by checking linked_gates from the gates module.
+local upkeep_timer = 0
+
+core.register_globalstep(function(dtime)
+    upkeep_timer = upkeep_timer + dtime
+    if upkeep_timer < UPKEEP_INTERVAL then return end
+    local elapsed = upkeep_timer
+    upkeep_timer = 0
+
+    -- Check if gates module is loaded
+    if not nexus.gate then return end
+
+    -- Iterate local gates that are linked
+    for addr, data in pairs(nexus.gate.get_local_gates and nexus.gate.get_local_gates() or {}) do
+        -- Only drain if this gate is linked (wormhole open)
+        -- We check via the proxy link state
+        if nexus.gate.is_linked and nexus.gate.is_linked(addr) then
+            local power = get_gate_power(addr)
+            -- Determine tier from the active link
+            local tier = nexus.gate.get_link_tier and nexus.gate.get_link_tier(addr) or 1
+            local drain = (UPKEEP_COST[tier] or 1.0) * elapsed
+
+            if power <= drain then
+                -- Power depleted — auto-close the wormhole
+                set_gate_power(addr, 0)
+                nexus.gate.close_link(addr, function()
+                    core.log("action", "[nexus_power] gate " .. addr ..
+                        " power depleted — wormhole collapsed")
+                end)
+                -- Notify nearby players
+                if data and data.center then
+                    core.chat_send_all("[nexus] Wormhole at " .. addr ..
+                        " collapsed — power depleted!")
+                    core.sound_play("nexus_gate_close", {
+                        pos = data.center, max_hear_distance = 30, gain = 0.8
+                    })
+                end
+            else
+                set_gate_power(addr, power - drain)
+            end
+        end
+    end
+end)
+
+-- =============================================================================
 -- Register as nexus.power Provider
 -- =============================================================================
 
@@ -388,10 +449,14 @@ core.register_chatcommand("gatepower", {
                         local cost1 = DIAL_COST[1] or "?"
                         local cost2 = DIAL_COST[2] or "?"
                         local cost3 = DIAL_COST[3] or "?"
+                        local up1 = UPKEEP_COST[1] or "?"
+                        local up2 = UPKEEP_COST[2] or "?"
+                        local up3 = UPKEEP_COST[3] or "?"
                         return true, "Gate " .. addr .. " — power: " .. power ..
-                            "\n  Same-world: " .. cost1 ..
-                            "\n  Same-galaxy: " .. cost2 ..
-                            "\n  Cross-galaxy: " .. cost3
+                            "\n  Dial costs:" ..
+                            "\n    Same-world: " .. cost1 .. " (upkeep " .. up1 .. "/s)" ..
+                            "\n    Same-galaxy: " .. cost2 .. " (upkeep " .. up2 .. "/s)" ..
+                            "\n    Cross-galaxy: " .. cost3 .. " (upkeep " .. up3 .. "/s)"
                     end
                 end
             end
