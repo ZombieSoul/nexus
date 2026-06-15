@@ -472,7 +472,7 @@ local function show_gate_formspec(pos, player)
 
     local parts = {
         "formspec_version[4]",
-        "size[11,12]",
+        "size[12,12]",
         "no_prepend[]",
         "bgcolor[#0A0A2A;true]",
         string.format(
@@ -508,29 +508,39 @@ local function show_gate_formspec(pos, player)
             parts[#parts+1] = string.format("button[3,%f;4,0.8;unlock;Unlock]", y)
             y = y + 1.2
         elseif unlocked then
-            -- Show saved addresses as buttons
+            -- Show saved addresses as buttons (using numeric index to
+            -- avoid corrupting addresses that contain underscores)
             local addrs = nexus.crystal.get_gate_addresses(pos)
             local has_addrs = false
             local btn_x = 0.5
             local btn_y = y
             local col = 0
+            local addr_map = {}  -- index → actual address
+            local addr_idx = 0
             for addr, entry in pairs(addrs) do
                 has_addrs = true
+                addr_idx = addr_idx + 1
+                addr_map[addr_idx] = addr
                 local lock_icon = entry.encrypted and " \194\187" or ""
                 local safe_label = core.formspec_escape(entry.label .. lock_icon)
                 parts[#parts+1] = string.format(
-                    "button[%f,%f;4.4,0.6;addr_%s;%s]",
-                    btn_x, btn_y, addr:gsub(":", "_"), safe_label)
+                    "button[%f,%f;5,0.6;addrbtn_%d;%s]",
+                    btn_x, btn_y, addr_idx, safe_label)
                 col = col + 1
                 if col >= 2 then
                     col = 0
                     btn_x = 0.5
                     btn_y = btn_y + 0.7
                 else
-                    btn_x = 5.1
+                    btn_x = 6.0
                 end
             end
+            -- Store the address map in player meta so the click handler
+            -- can look up the actual address
+            local pmeta = player:get_meta()
+            pmeta:set_string("nexus_addr_map", core.write_json(addr_map))
             if not has_addrs then
+                pmeta:set_string("nexus_addr_map", "")
                 parts[#parts+1] = string.format(
                     "hypertext[0.5,%f;9,0.5;no_addr;<global halign=center><style color=#666666 size=13>Crystal has no saved addresses</style>]", y)
             end
@@ -725,14 +735,19 @@ core.register_on_player_receive_fields(function(player, formname, fields)
         return true
     end
 
-    -- Handle crystal address button clicks
+    -- Handle crystal address button clicks (numeric index → actual address)
     for field_name in pairs(fields) do
-        local clicked_addr = field_name:match("^addr_(.+)$")
-        if clicked_addr then
-            -- Convert _ back to : (address had : replaced for formspec names)
-            local dest = clicked_addr:gsub("_", ":")
-            fields.dest = dest
-            break
+        local clicked_idx = field_name:match("^addrbtn_(%d+)$")
+        if clicked_idx then
+            local addr_map_str = pmeta:get_string("nexus_addr_map")
+            if addr_map_str ~= "" then
+                local addr_map = core.parse_json(addr_map_str)
+                local dest = addr_map and addr_map[clicked_idx]
+                if dest then
+                    fields.dest = dest
+                    break
+                end
+            end
         end
     end
 
