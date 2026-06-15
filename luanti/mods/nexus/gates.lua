@@ -472,7 +472,7 @@ local function show_gate_formspec(pos, player)
 
     local parts = {
         "formspec_version[4]",
-        "size[10,12]",
+        "size[11,12]",
         "no_prepend[]",
         "bgcolor[#0A0A2A;true]",
         string.format(
@@ -547,7 +547,7 @@ local function show_gate_formspec(pos, player)
 
     -- Player inventory (shown so players can drag/shift-click crystals into the gate slot)
     parts[#parts+1] = "hypertext[0.5,0;0,0;inv_label;]"  -- placeholder
-    parts[#parts+1] = string.format("list[current_player;main;1,%f;8,4;]", y)
+    parts[#parts+1] = string.format("list[current_player;main;1.5,%f;8,4;]", y)
     -- Listrings enable shift-click to move items between gate crystal slot and player inventory
     parts[#parts+1] = string.format("listring[nodemeta:%d,%d,%d;crystal]", pos.x, pos.y, pos.z)
     parts[#parts+1] = "listring[current_player;main]"
@@ -614,11 +614,15 @@ core.register_node(GATE_NODE, {
     on_metadata_inventory_put = function(pos, listname, index, stack, player)
         -- Lock the gate crystal slot when a new crystal is inserted
         nexus.crystal.lock(pos)
+        -- Refresh the formspec so address buttons appear immediately
+        show_gate_formspec(pos, player)
     end,
 
     on_metadata_inventory_take = function(pos, listname, index, stack, player)
         -- Lock when removed
         nexus.crystal.lock(pos)
+        -- Refresh so the buttons/PIN disappear
+        show_gate_formspec(pos, player)
     end,
 })
 
