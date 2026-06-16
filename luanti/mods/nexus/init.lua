@@ -62,6 +62,9 @@ nexus._config = {
     http_timeout = HTTP_TIMEOUT,
 }
 
+-- Expose keystone colors for worldgen (populated by gates.lua)
+nexus._keystone_colors = nil
+
 -- Track players who just arrived (anti-loop / restore-in-progress flag)
 local pending_arrival = {}
 

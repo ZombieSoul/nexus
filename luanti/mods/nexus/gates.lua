@@ -517,6 +517,9 @@ local KEYSTONE_COLORS = {
     "red", "orange", "yellow", "green", "cyan", "blue",
     "violet", "magenta", "white", "pink", "lime", "amber",
 }
+-- Expose for worldgen
+nexus._keystone_colors = KEYSTONE_COLORS
+
 local KEYSTONE_OFF = "nexus:keystone_off"
 local function keystone_lit_name(color)
     return "nexus:keystone_lit_" .. color
@@ -751,6 +754,9 @@ local function show_gate_formspec(pos, player)
 
     core.show_formspec(pname, "nexus:gate_dial", table.concat(parts, "\n"))
 end
+
+-- Expose formspec function for worldgen's ancient gate blocks
+nexus._show_gate_formspec = show_gate_formspec
 
 core.register_node(GATE_NODE, {
     description = "Stargate Base",
