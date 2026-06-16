@@ -593,7 +593,7 @@ core.register_chatcommand("travel", {
 		end
 
 		-- Don't allow travel to the server we're already on
-		if destination == GALAXY_NAME then
+		if destination == GALAXY_NAME or destination == WORLD_NAME then
 			return false, "You are already on " .. GALAXY_LABEL
 		end
 
