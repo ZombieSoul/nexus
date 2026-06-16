@@ -494,6 +494,10 @@ core.register_on_generated(function(minp, maxp, seed)
     -- Only generate in the overworld (not too high, not too low)
     if minp.y < -64 or minp.y > 128 then return end
 
+    -- Don't generate ruins near world spawn (avoid interfering with spawn mechanics)
+    local dist_from_origin = math.sqrt(minp.x * minp.x + minp.z * minp.z)
+    if dist_from_origin < 200 then return end  -- keep 200 blocks clear around spawn
+
     -- Use chunk coordinates to determine if this chunk should have a ruin
     local chunk_x = math.floor(minp.x / 80)
     local chunk_z = math.floor(minp.z / 80)
