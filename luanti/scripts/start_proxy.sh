@@ -10,6 +10,7 @@ if [ ! -f "$SECRET_FILE" ]; then
     exit 1
 fi
 export NEXUS_API_SECRET="$(cat "$SECRET_FILE")"
+export NEXUS_API_PORT=8090
 
 # Use SQLite for state persistence (survives proxy restart)
 export NEXUS_STORAGE_BACKEND=sqlite
