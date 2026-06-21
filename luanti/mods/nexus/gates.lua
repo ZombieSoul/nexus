@@ -650,104 +650,117 @@ local function show_gate_formspec(pos, player)
     local pname = player:get_player_name()
     local meta = core.get_meta(pos)
     local address = meta:get_string("address")
+    local is_ancient = meta:get_string("ancient") == "true"
     local linked = linked_gates[address] ~= nil
 
-    local status = linked and "Linked (wormhole open)" or "Idle"
-    local status_color = linked and "00FF00" or "888888"
+    local title = is_ancient and "Ancient Stargate" or "Stargate"
+    local status_text = linked and "● LINKED" or "○ IDLE"
+    local status_color = linked and "#33FF66" or "#666688"
 
     local parts = {
         "formspec_version[4]",
-        "size[12,12]",
+        "size[12,13.5]",
         "no_prepend[]",
-        "bgcolor[#0A0A2A;true]",
+        "bgcolor[#0D0D1A;true]",
+        -- Global button style
+        "style_type[button;bgcolor=#2A2A4A;bgcolor_hover=#3A3A5A;textcolor=#CCCCCC]",
+        -- Header bar
+        "box[0,0;12,1.2;#15152A]",
         string.format(
-            "hypertext[0.5,0.2;9,0.8;addr;<global halign=center><style color=#00BFFF size=18>Stargate: %s</style>]",
+            "hypertext[0.5,0.25;11,0.5;title;<global halign=center><style color=#00BFFF size=20 font=bold>%s</style>]",
+            core.formspec_escape(title)),
+        string.format(
+            "hypertext[0.5,0.75;11,0.4;addr;<global halign=center><style color=#888899 size=12 font=mono>%s</style>]",
             core.formspec_escape(address)),
+        -- Status badge (top-right)
         string.format(
-            "hypertext[0.5,0.9;9,0.5;status;<global halign=center><style color=#%s size=14>%s</style>]",
-            status_color, status),
-        -- Crystal slot + label
-        "label[0.5,1.8;Crystal slot:]",
-        "listcolors[#333355;#555577;#000000;#444466;#666688]",
-        -- Visible box behind the slot so players can see it
-        string.format("box[2.9,1.6;1.2,1.2;#333355]"),
-        string.format("list[nodemeta:%d,%d,%d;crystal;3,1.7;1,1;]", pos.x, pos.y, pos.z),
-        "hypertext[4.5,1.7;5,1.2;slot_help;<style color=#888888 size=12>Insert a resonance crystal here to load saved addresses.\\nShift-click the crystal in your inventory below to insert it.</style>]",
+            "hypertext[0.5,1.3;11,0.4;status;<global halign=center><style color=%s size=13>%s</style>]",
+            status_color, status_text),
+
+        -- ── Crystal section ──
+        "box[0.3,1.9;11.4,1.6;#15152A]",
+        "label[0.6,2.15;Crystal]",
+        "listcolors[#2A2A45;#3D3D5C;#000000;#444460;#666688]",
+        string.format("box[0.6,2.35;0.95,0.95;#2A2A45]"),
+        string.format("list[nodemeta:%d,%d,%d;crystal;0.6,2.35;1,1;]", pos.x, pos.y, pos.z),
+        "hypertext[1.8,2.4;9.5,1;slot_help;<style color=#7777AA size=11>Insert a resonance crystal to load saved addresses.\\nShift-click the crystal from your inventory to insert.</style>]",
     }
 
-    -- Crystal addresses or PIN entry
+    -- Crystal content (addresses or PIN)
     local crystal = nexus.crystal.get_gate_crystal(pos)
-    local y = 3.1
 
     if crystal then
         local is_private = nexus.crystal.is_private(crystal)
         local unlocked = nexus.crystal.is_gate_unlocked(pos)
 
         if is_private and not unlocked then
-            -- Show PIN entry
-            parts[#parts+1] = string.format(
-                "hypertext[0.5,%f;9,0.5;pin_hint;<global halign=center><style color=#FF8800 size=14>Private crystal — enter PIN to activate</style>]", y)
-            y = y + 0.7
-            parts[#parts+1] = string.format("pwd[3,%f;4,0.8;gate_pin;PIN]", y)
-            y = y + 1.0
-            parts[#parts+1] = string.format("button[3,%f;4,0.8;unlock;Unlock]", y)
-            y = y + 1.2
+            -- PIN entry section
+            parts[#parts+1] = "box[0.3,3.7;11.4,1.8;#15152A]"
+            parts[#parts+1] = "label[0.6,3.95;PIN Required]"
+            parts[#parts+1] = "hypertext[0.6,4.2;10,0.5;pin_hint;<style color=#FF9944 size=12>Private crystal — enter PIN to activate</style>]"
+            parts[#parts+1] = "pwd[4,4.5;4,0.8;gate_pin;Enter PIN]"
+            parts[#parts+1] = "button[4,5.3;4,0.7;unlock;Unlock Crystal]"
         elseif unlocked then
-            -- Show saved addresses as buttons (using numeric index to
-            -- avoid corrupting addresses that contain underscores)
+            -- Address buttons section
+            parts[#parts+1] = "box[0.3,3.7;11.4,3.3;#15152A]"
+            parts[#parts+1] = "label[0.6,3.95;Saved Addresses]"
+
             local addrs = nexus.crystal.get_gate_addresses(pos)
             local has_addrs = false
-            local btn_x = 0.5
-            local btn_y = y
+            local btn_x = 0.6
+            local btn_y = 4.3
             local col = 0
-            local addr_map = {}  -- index → actual address
+            local addr_map = {}
             local addr_idx = 0
             for addr, entry in pairs(addrs) do
                 has_addrs = true
                 addr_idx = addr_idx + 1
                 addr_map[addr_idx] = addr
-                local lock_icon = entry.encrypted and " \194\187" or ""
-                local safe_label = core.formspec_escape(entry.label .. lock_icon)
+                local lock = entry.encrypted and " \226\150\160" or ""
+                local safe_label = core.formspec_escape(entry.label .. lock)
                 parts[#parts+1] = string.format(
-                    "button[%f,%f;5,0.6;addrbtn_%d;%s]",
+                    "button[%f,%f;5.3,0.65;addrbtn_%d;%s]",
                     btn_x, btn_y, addr_idx, safe_label)
                 col = col + 1
                 if col >= 2 then
                     col = 0
-                    btn_x = 0.5
-                    btn_y = btn_y + 0.7
+                    btn_x = 0.6
+                    btn_y = btn_y + 0.75
                 else
-                    btn_x = 6.0
+                    btn_x = 6.1
                 end
             end
-            -- Store the address map in player meta so the click handler
-            -- can look up the actual address
+
             local pmeta = player:get_meta()
             pmeta:set_string("nexus_addr_map", core.write_json(addr_map))
+
             if not has_addrs then
                 pmeta:set_string("nexus_addr_map", "")
-                parts[#parts+1] = string.format(
-                    "hypertext[0.5,%f;9,0.5;no_addr;<global halign=center><style color=#666666 size=13>Crystal has no saved addresses</style>]", y)
+                parts[#parts+1] = "hypertext[0.6,4.5;10,0.5;no_addr;<style color=#555566 size=12>This crystal has no saved addresses</style>]"
             end
-            y = btn_y + 0.8
         end
+    else
+        -- No crystal
+        parts[#parts+1] = "box[0.3,3.7;11.4,1.5;#15152A]"
+        parts[#parts+1] = "label[0.6,3.95;Addresses]"
+        parts[#parts+1] = "hypertext[0.6,4.3;10,0.5;no_crystal;<style color=#555566 size=12>No crystal inserted. Insert one to access saved addresses.</style>]"
     end
 
-    -- Manual dial section
-    parts[#parts+1] = string.format("field[1,%f;7,0.8;dest;Or type an address;]", y)
-    y = y + 0.9
-    parts[#parts+1] = string.format("button[1,%f;3,0.8;dial;Dial]", y)
-    parts[#parts+1] = string.format("button[5,%f;3,0.8;close;Close Link]", y)
-    y = y + 1.2
+    -- ── Manual dial section ──
+    parts[#parts+1] = "box[0.3,7.2;11.4,2.2;#15152A]"
+    parts[#parts+1] = "label[0.6,7.45;Manual Dial]"
+    parts[#parts+1] = "field[0.6,7.8;7.5,0.8;dest;Destination Address;]"
+    parts[#parts+1] = "button[0.6,8.6;3.5,0.75;dial;⏵ Dial]"
+    parts[#parts+1] = "button[4.3,8.6;3.5,0.75;close;✕ Close Link]"
 
-    -- Player inventory (shown so players can drag/shift-click crystals into the gate slot)
-    parts[#parts+1] = "hypertext[0.5,0;0,0;inv_label;]"  -- placeholder
-    parts[#parts+1] = string.format("list[current_player;main;1.5,%f;8,4;]", y)
-    -- Listrings enable shift-click to move items between gate crystal slot and player inventory
+    -- ── Inventory section ──
+    parts[#parts+1] = "box[0.3,9.6;11.4,3.6;#15152A]"
+    parts[#parts+1] = "label[0.6,9.85;Inventory]"
+    parts[#parts+1] = string.format("list[current_player;main;1,%f;8,4;]", 10.2)
     parts[#parts+1] = string.format("listring[nodemeta:%d,%d,%d;crystal]", pos.x, pos.y, pos.z)
     parts[#parts+1] = "listring[current_player;main]"
 
-    -- Store position in player meta so the formspec handler knows which gate
+    -- Store position in player meta
     local pmeta = player:get_meta()
     pmeta:set_string("nexus_gate_pos",
         pos.x .. "," .. pos.y .. "," .. pos.z)
