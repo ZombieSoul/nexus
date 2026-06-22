@@ -655,35 +655,35 @@ local function show_gate_formspec(pos, player)
 
     local title = is_ancient and "Ancient Stargate" or "Stargate"
     local status_text = linked and "● LINKED" or "○ IDLE"
-    local status_color = linked and "#33FF66" or "#666688"
+    local status_color = linked and "#2BA830" or "#7A7A7A"
+
+    -- Use Mineclonia's formspec helpers if available, else fallback
+    local LC = "#313131"  -- Mineclonia label color
+    local function islot(x, y, w, h)
+        if mcl_formspec and mcl_formspec.get_itemslot_bg_v4 then
+            return mcl_formspec.get_itemslot_bg_v4(x, y, w, h)
+        end
+        return ""
+    end
 
     local parts = {
         "formspec_version[4]",
         "size[12,14.5]",
-        "no_prepend[]",
-        "bgcolor[#0D0D1A;true]",
-        -- Global button style
-        "style_type[button;bgcolor=#2A2A4A;bgcolor_hover=#3A3A5A;textcolor=#CCCCCC]",
-        -- Header bar
-        "box[0,0;12,1.2;#15152A]",
+        -- NO no_prepend — let Mineclonia's background theme apply
+        string.format("label[4.5,0.4;%s]", title),
         string.format(
-            "hypertext[0.5,0.25;11,0.5;title;<global halign=center><style color=#00BFFF size=20 font=bold>%s</style>]",
-            core.formspec_escape(title)),
+            "label[3,0.9;%s]",
+            address),
         string.format(
-            "hypertext[0.5,0.75;11,0.4;addr;<global halign=center><style color=#888899 size=12 font=mono>%s</style>]",
-            core.formspec_escape(address)),
-        -- Status badge (top-right)
-        string.format(
-            "hypertext[0.5,1.3;11,0.4;status;<global halign=center><style color=%s size=13>%s</style>]",
-            status_color, status_text),
+            "label[4.8,1.3;%s%s%s]",
+            core.colorize(status_color, status_text), "", ""),
 
         -- ── Crystal section ──
-        "box[0.3,1.9;11.4,1.6;#15152A]",
-        "label[0.6,2.15;Crystal]",
-        "listcolors[#2A2A45;#3D3D5C;#000000;#444460;#666688]",
-        string.format("box[0.6,2.35;0.95,0.95;#2A2A45]"),
-        string.format("list[nodemeta:%d,%d,%d;crystal;0.6,2.35;1,1;]", pos.x, pos.y, pos.z),
-        "hypertext[1.8,2.4;9.5,1;slot_help;<style color=#7777AA size=11>Insert a resonance crystal to load saved addresses.\\nShift-click the crystal from your inventory to insert.</style>]",
+        "label[0.4,1.9;Crystal]",
+        islot(0.6, 2.1, 1, 1),
+        string.format("list[nodemeta:%d,%d,%d;crystal;0.6,2.1;1,1;]", pos.x, pos.y, pos.z),
+        "label[1.9,2.3;Insert a resonance crystal to load saved addresses]",
+        "label[1.9,2.6;Shift-click from your inventory to insert]",
     }
 
     -- Crystal content (addresses or PIN)
@@ -694,21 +694,21 @@ local function show_gate_formspec(pos, player)
         local unlocked = nexus.crystal.is_gate_unlocked(pos)
 
         if is_private and not unlocked then
-            -- PIN entry section
-            parts[#parts+1] = "box[0.3,3.7;11.4,1.8;#15152A]"
-            parts[#parts+1] = "label[0.6,3.95;PIN Required]"
-            parts[#parts+1] = "hypertext[0.6,4.2;10,0.5;pin_hint;<style color=#FF9944 size=12>Private crystal — enter PIN to activate</style>]"
-            parts[#parts+1] = "pwd[4,4.5;4,0.8;gate_pin;Enter PIN]"
-            parts[#parts+1] = "button[4,5.3;4,0.7;unlock;Unlock Crystal]"
+            -- PIN entry
+            parts[#parts+1] = "label[0.4,3.5;PIN Required]"
+            parts[#parts+1] = string.format(
+                "label[0.4,3.8;%sPrivate crystal — enter PIN to activate%s]",
+                core.colorize("#C87000", ""), "")
+            parts[#parts+1] = "pwd[4,4.1;4,0.8;gate_pin;Enter PIN]"
+            parts[#parts+1] = "button[4,4.9;4,0.7;unlock;Unlock Crystal]"
         elseif unlocked then
-            -- Address buttons section
-            parts[#parts+1] = "box[0.3,3.7;11.4,3.3;#15152A]"
-            parts[#parts+1] = "label[0.6,3.95;Saved Addresses]"
+            -- Saved addresses
+            parts[#parts+1] = "label[0.4,3.5;Saved Addresses]"
 
             local addrs = nexus.crystal.get_gate_addresses(pos)
             local has_addrs = false
-            local btn_x = 0.6
-            local btn_y = 4.3
+            local btn_x = 0.4
+            local btn_y = 3.9
             local col = 0
             local addr_map = {}
             local addr_idx = 0
@@ -719,13 +719,13 @@ local function show_gate_formspec(pos, player)
                 local lock = entry.encrypted and " \226\150\160" or ""
                 local safe_label = core.formspec_escape(entry.label .. lock)
                 parts[#parts+1] = string.format(
-                    "button[%f,%f;5.3,0.65;addrbtn_%d;%s]",
+                    "button[%f,%f;5.5,0.7;addrbtn_%d;%s]",
                     btn_x, btn_y, addr_idx, safe_label)
                 col = col + 1
                 if col >= 2 then
                     col = 0
-                    btn_x = 0.6
-                    btn_y = btn_y + 0.75
+                    btn_x = 0.4
+                    btn_y = btn_y + 0.8
                 else
                     btn_x = 6.1
                 end
@@ -736,27 +736,24 @@ local function show_gate_formspec(pos, player)
 
             if not has_addrs then
                 pmeta:set_string("nexus_addr_map", "")
-                parts[#parts+1] = "hypertext[0.6,4.5;10,0.5;no_addr;<style color=#555566 size=12>This crystal has no saved addresses</style>]"
+                parts[#parts+1] = "label[0.4,4.1;This crystal has no saved addresses]"
             end
         end
     else
-        -- No crystal
-        parts[#parts+1] = "box[0.3,3.7;11.4,1.5;#15152A]"
-        parts[#parts+1] = "label[0.6,3.95;Addresses]"
-        parts[#parts+1] = "hypertext[0.6,4.3;10,0.5;no_crystal;<style color=#555566 size=12>No crystal inserted. Insert one to access saved addresses.</style>]"
+        parts[#parts+1] = "label[0.4,3.5;Addresses]"
+        parts[#parts+1] = "label[0.4,3.8;No crystal inserted]"
     end
 
     -- ── Manual dial section ──
-    parts[#parts+1] = "box[0.3,7.2;11.4,2.6;#15152A]"
-    parts[#parts+1] = "label[0.6,7.45;Manual Dial]"
-    parts[#parts+1] = "field[0.6,8.0;7.5,0.8;dest;Destination Address;]"
-    parts[#parts+1] = "button[0.6,8.9;3.5,0.75;dial;⏵ Dial]"
-    parts[#parts+1] = "button[4.3,8.9;3.5,0.75;close;✕ Close Link]"
+    parts[#parts+1] = "label[0.4,7.2;Manual Dial]"
+    parts[#parts+1] = "field[0.4,7.6;7.5,0.9;dest;Destination Address;]"
+    parts[#parts+1] = "button[0.4,8.6;3.5,0.8;dial;Dial]"
+    parts[#parts+1] = "button[4.1,8.6;3.5,0.8;close;Close Link]"
 
     -- ── Inventory section ──
-    parts[#parts+1] = "box[0.3,10.0;11.4,3.2;#15152A]"
-    parts[#parts+1] = "label[0.6,10.25;Inventory]"
-    parts[#parts+1] = string.format("list[current_player;main;1,%f;8,4;]", 10.6)
+    parts[#parts+1] = "label[0.4,9.7;Inventory]"
+    parts[#parts+1] = islot(1, 10.0, 8, 4)
+    parts[#parts+1] = string.format("list[current_player;main;1,10.0;8,4;]")
     parts[#parts+1] = string.format("listring[nodemeta:%d,%d,%d;crystal]", pos.x, pos.y, pos.z)
     parts[#parts+1] = "listring[current_player;main]"
 

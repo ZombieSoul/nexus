@@ -184,60 +184,57 @@ function nexus.crystal.show_manage_gui(itemstack, player)
     local pname = player:get_player_name()
     local data = get_crystal_data(itemstack)
 
+    local function islot(x, y, w, h)
+        if mcl_formspec and mcl_formspec.get_itemslot_bg_v4 then
+            return mcl_formspec.get_itemslot_bg_v4(x, y, w, h)
+        end
+        return ""
+    end
+
+    local pin_text = data.private and "Private (PIN set)" or "Public (no PIN)"
+    local pin_color = data.private and "#C87000" or "#7A7A7A"
+
     local parts = {
         "formspec_version[4]",
         "size[9,10]",
-        "no_prepend[]",
-        "bgcolor[#0D0D1A;true]",
-        "style_type[button;bgcolor=#2A2A4A;bgcolor_hover=#3A3A5A;textcolor=#CCCCCC]",
-        -- Header bar
-        "box[0,0;9,1;#15152A]",
-        "hypertext[0.5,0.25;8,0.5;title;<global halign=center><style color=#00BFFF size=18 font=bold>Resonance Crystal</style>]",
+        -- No no_prepend — let Mineclonia theme apply
+        "label[3,0.4;Resonance Crystal]",
+        string.format("label[2.5,0.8;%s%s%s]",
+            core.colorize(pin_color, ""), pin_text, ""),
     }
 
-    -- PIN status badge
-    local pin_text = data.private and "● PRIVATE (PIN set)" or "○ PUBLIC (no PIN)"
-    local pin_color = data.private and "#FF9944" or "#666688"
-    parts[#parts+1] = string.format(
-        "hypertext[0.5,0.65;8,0.3;pin_badge;<global halign=center><style color=%s size=11>%s</style>]",
-        pin_color, pin_text)
+    -- ── Saved addresses ──
+    parts[#parts+1] = "label[0.4,1.4;Saved Addresses]"
 
-    -- ── Saved addresses section ──
-    parts[#parts+1] = "box[0.3,1.2;8.4,3.5;#15152A]"
-    parts[#parts+1] = "label[0.6,1.45;Saved Addresses]"
-
-    local y = 1.85
+    local y = 1.8
     local count = 0
     for addr, entry in pairs(data.addresses) do
         count = count + 1
         local lock = entry.encrypted and " \226\150\160" or ""
         local label = core.formspec_escape(entry.label .. lock)
+        parts[#parts+1] = string.format("label[0.5,%f;%s]", y, label)
         parts[#parts+1] = string.format(
-            "label[0.7,%f;%s]", y, label)
-        parts[#parts+1] = string.format(
-            "button[6.5,%f;1.8,0.5;del_%d;Remove]",
+            "button[6.5,%f;1.8,0.6;del_%d;Remove]",
             y - 0.1, count)
-        y = y + 0.55
+        y = y + 0.6
     end
 
     if count == 0 then
-        parts[#parts+1] = "hypertext[0.6,2.2;8,0.5;empty;<global halign=center><style color=#555566 size=12>No saved addresses on this crystal</style>]"
+        parts[#parts+1] = "label[0.5,2.1;No saved addresses on this crystal]"
     end
 
-    -- ── Add address section ──
-    parts[#parts+1] = "box[0.3,4.9;8.4,2.5;#15152A]"
-    parts[#parts+1] = "label[0.6,5.15;Save New Address]"
-    parts[#parts+1] = "field[0.6,5.5;5,0.7;new_addr;Address;]"
-    parts[#parts+1] = "field[5.8,5.5;2.5,0.7;new_label;Label;]"
-    parts[#parts+1] = "checkbox[0.6,6.2;new_encrypted;Encrypt (hide address);false]"
-    parts[#parts+1] = "button[5,6.4;3.5,0.7;add;Save Address]"
+    -- ── Add address ──
+    parts[#parts+1] = "label[0.4,5.0;Save New Address]"
+    parts[#parts+1] = "field[0.4,5.4;5,0.8;new_addr;Address;]"
+    parts[#parts+1] = "field[5.6,5.4;2.8,0.8;new_label;Label;]"
+    parts[#parts+1] = "checkbox[0.4,6.1;new_encrypted;Encrypt (hide address);false]"
+    parts[#parts+1] = "button[4.8,6.3;3.6,0.8;add;Save Address]"
 
-    -- ── PIN management section ──
-    parts[#parts+1] = "box[0.3,7.6;8.4,1.8;#15152A]"
-    parts[#parts+1] = "label[0.6,7.85;Security]"
-    parts[#parts+1] = "field[0.6,8.2;4,0.7;new_pin;New PIN;]"
-    parts[#parts+1] = "button[5,8.3;3.5,0.7;set_pin;Set / Change PIN]"
-    parts[#parts+1] = "hypertext[0.6,9.0;8,0.3;pin_help;<style color=#555566 size=10>Private crystals require a PIN to use in gates. They cannot be duplicated.</style>]"
+    -- ── Security ──
+    parts[#parts+1] = "label[0.4,7.5;Security]"
+    parts[#parts+1] = "field[0.4,7.9;4,0.8;new_pin;New PIN;]"
+    parts[#parts+1] = "button[4.8,8.0;3.6,0.8;set_pin;Set / Change PIN]"
+    parts[#parts+1] = "label[0.4,8.9;Private crystals require a PIN to use in gates and cannot be duplicated.]"
 
     core.show_formspec(pname, "nexus:crystal_manage", table.concat(parts))
 
