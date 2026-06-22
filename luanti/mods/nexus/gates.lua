@@ -659,7 +659,7 @@ local function show_gate_formspec(pos, player)
 
     local parts = {
         "formspec_version[4]",
-        "size[12,13.5]",
+        "size[12,14.5]",
         "no_prepend[]",
         "bgcolor[#0D0D1A;true]",
         -- Global button style
@@ -747,16 +747,16 @@ local function show_gate_formspec(pos, player)
     end
 
     -- ── Manual dial section ──
-    parts[#parts+1] = "box[0.3,7.2;11.4,2.2;#15152A]"
+    parts[#parts+1] = "box[0.3,7.2;11.4,2.6;#15152A]"
     parts[#parts+1] = "label[0.6,7.45;Manual Dial]"
-    parts[#parts+1] = "field[0.6,7.8;7.5,0.8;dest;Destination Address;]"
-    parts[#parts+1] = "button[0.6,8.6;3.5,0.75;dial;⏵ Dial]"
-    parts[#parts+1] = "button[4.3,8.6;3.5,0.75;close;✕ Close Link]"
+    parts[#parts+1] = "field[0.6,8.0;7.5,0.8;dest;Destination Address;]"
+    parts[#parts+1] = "button[0.6,8.9;3.5,0.75;dial;⏵ Dial]"
+    parts[#parts+1] = "button[4.3,8.9;3.5,0.75;close;✕ Close Link]"
 
     -- ── Inventory section ──
-    parts[#parts+1] = "box[0.3,9.6;11.4,3.6;#15152A]"
-    parts[#parts+1] = "label[0.6,9.85;Inventory]"
-    parts[#parts+1] = string.format("list[current_player;main;1,%f;8,4;]", 10.2)
+    parts[#parts+1] = "box[0.3,10.0;11.4,3.2;#15152A]"
+    parts[#parts+1] = "label[0.6,10.25;Inventory]"
+    parts[#parts+1] = string.format("list[current_player;main;1,%f;8,4;]", 10.6)
     parts[#parts+1] = string.format("listring[nodemeta:%d,%d,%d;crystal]", pos.x, pos.y, pos.z)
     parts[#parts+1] = "listring[current_player;main]"
 
