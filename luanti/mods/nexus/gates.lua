@@ -668,7 +668,7 @@ local function show_gate_formspec(pos, player)
 
     local parts = {
         "formspec_version[4]",
-        "size[12,14.5]",
+        "size[12,15.5]",
         -- NO no_prepend — let Mineclonia's background theme apply
         string.format("label[4.5,0.4;%s]", title),
         string.format(
@@ -746,14 +746,14 @@ local function show_gate_formspec(pos, player)
 
     -- ── Manual dial section ──
     parts[#parts+1] = "label[0.4,7.2;Manual Dial]"
-    parts[#parts+1] = "field[0.4,7.6;7.5,0.9;dest;Destination Address;]"
-    parts[#parts+1] = "button[0.4,8.6;3.5,0.8;dial;Dial]"
-    parts[#parts+1] = "button[4.1,8.6;3.5,0.8;close;Close Link]"
+    parts[#parts+1] = "field[0.4,7.9;7.5,0.9;dest;Destination Address;]"
+    parts[#parts+1] = "button[0.4,8.9;3.5,0.8;dial;Dial]"
+    parts[#parts+1] = "button[4.1,8.9;3.5,0.8;close;Close Link]"
 
     -- ── Inventory section ──
-    parts[#parts+1] = "label[0.4,9.7;Inventory]"
-    parts[#parts+1] = islot(1, 10.0, 8, 4)
-    parts[#parts+1] = string.format("list[current_player;main;1,10.0;8,4;]")
+    parts[#parts+1] = "label[0.4,10.0;Inventory]"
+    parts[#parts+1] = islot(1, 10.4, 8, 4)
+    parts[#parts+1] = string.format("list[current_player;main;1,10.4;8,4;]")
     parts[#parts+1] = string.format("listring[nodemeta:%d,%d,%d;crystal]", pos.x, pos.y, pos.z)
     parts[#parts+1] = "listring[current_player;main]"
 
