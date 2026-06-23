@@ -926,40 +926,12 @@ core.register_node(HORIZON_NODE, {
     post_effect_color = {a = 100, r = 30, g = 60, b = 180},
 })
 
--- Portal particle effect: glowing particles drift inside active gates
--- Managed directly in the link-state poller (not via wrapping) to avoid
--- async race conditions and closure capture issues.
-local portal_particles = {}  -- address → particle spawner id
+-- Portal particles disabled — invisible inside alpha-blended blocks.
+-- The animated water-style texture provides the visual interest.
+local portal_particles = {}
 
-local function start_portal_particles(base_pos)
-    local address = core.get_meta(base_pos):get_string("address")
-    if portal_particles[address] then return end  -- already running
-    local center = get_center(base_pos)
-    portal_particles[address] = core.add_particlespawner({
-        amount = 15,
-        time = 0,
-        minpos = {x = center.x - 2, y = center.y - 2, z = center.z - 0.2},
-        maxpos = {x = center.x + 2, y = center.y + 2, z = center.z + 0.2},
-        minvel = {x = -0.3, y = -0.2, z = -0.1},
-        maxvel = {x = 0.3, y = 0.3, z = 0.1},
-        minacc = {x = 0, y = 0, z = 0},
-        maxacc = {x = 0, y = 0.05, z = 0},
-        minexptime = 2.0,
-        maxexptime = 4.0,
-        minsize = 0.2,
-        maxsize = 0.6,
-        texture = "nexus_portal_particle.png",
-        glow = 14,
-    })
-end
-
-local function stop_portal_particles(base_pos)
-    local address = core.get_meta(base_pos):get_string("address")
-    if portal_particles[address] then
-        core.delete_particlespawner(portal_particles[address])
-        portal_particles[address] = nil
-    end
-end
+local function start_portal_particles(base_pos) end
+local function stop_portal_particles(base_pos) end
 
 -- Re-register gates on server restart (LBM fires for loaded nodes)
 core.register_lbm({
