@@ -937,39 +937,42 @@ core.register_lbm({
 -- On server startup, re-register ALL gates from mod_storage — even ones in
 -- unloaded chunks. This ensures gates are always dialable as soon as the
 -- server starts, without needing a player to physically visit them first.
-core.register_on_mods_loaded(function()
-    -- Small delay to let the proxy HTTP API be ready
-    core.after(3, function()
-        local keys = storage:to_table().fields
-        local count = 0
-        for key, val in pairs(keys) do
-            if key:match("^gate_") and val ~= "" then
-                local parts = string.split(val, ",")
-                local pos = {
-                    x = tonumber(parts[1]),
-                    y = tonumber(parts[2]),
-                    z = tonumber(parts[3]),
-                }
-                if pos.x then
-                    -- Verify the gate node still exists at this position
-                    local node = core.get_node(pos)
-                    if node.name == GATE_NODE then
-                        register_gate_at(pos)
-                        count = count + 1
-                    else
-                        -- Gate was destroyed while server was offline — clean up
-                        local address = key:sub(5)  -- strip "gate_" prefix
-                        storage:set_string(key, "")
-                        core.log("action", "[nexus] cleaned up stale gate: " .. address)
-                    end
+local function reregister_gates()
+    local keys = storage:to_table().fields
+    local count = 0
+    for key, val in pairs(keys) do
+        if key:match("^gate_") and val ~= "" then
+            local parts = string.split(val, ",")
+            local pos = {
+                x = tonumber(parts[1]),
+                y = tonumber(parts[2]),
+                z = tonumber(parts[3]),
+            }
+            if pos.x then
+                local node = core.get_node(pos)
+                if node.name == GATE_NODE then
+                    register_gate_at(pos)
+                    count = count + 1
+                else
+                    local address = key:sub(5)
+                    storage:set_string(key, "")
+                    core.log("action", "[nexus] cleaned up stale gate: " .. address)
                 end
             end
         end
-        if count > 0 then
-            core.log("action", "[nexus] re-registered " .. count ..
-                " gate(s) from storage on startup")
-        end
-    end)
+    end
+    if count > 0 then
+        core.log("action", "[nexus] re-registered " .. count ..
+            " gate(s) from storage on startup")
+    end
+    return count
+end
+
+core.register_on_mods_loaded(function()
+    -- Try immediately, then retry at 1s and 3s in case the proxy wasn't ready
+    reregister_gates()
+    core.after(1, reregister_gates)
+    core.after(3, reregister_gates)
 end)
 
 -- =============================================================================
@@ -1579,13 +1582,13 @@ core.register_globalstep(function(dtime)
             local is_linked = link and link.linked
             local was_linked = linked_gates[address] ~= nil
 
+            -- ENFORCE visual state, not just react to changes.
+            -- This fixes desync after restarts: leftover event horizon
+            -- nodes get cleaned up, missing ones get placed.
             if is_linked and not was_linked then
-                -- Link just appeared — but skip if this gate is currently dialing
-                -- (the dialing sequence will place the horizon when it completes)
                 if dialing_in_progress[address] then
-                    linked_gates[address] = true  -- track it, but don't place horizon yet
+                    linked_gates[address] = true
                 else
-                    -- Incoming link or local link detected — place event horizon
                     linked_gates[address] = true
                     place_event_horizon(gate_data.pos)
                     core.sound_play("nexus_gate_open", {
@@ -1593,14 +1596,17 @@ core.register_globalstep(function(dtime)
                     })
                 end
             elseif not is_linked and was_linked then
-                -- Link just disappeared — remove event horizon
                 linked_gates[address] = nil
-    gate_link_tiers[address] = nil
+                gate_link_tiers[address] = nil
                 remove_event_horizon(gate_data.pos)
                 reset_keystones(gate_data.pos)
                 core.sound_play("nexus_gate_close", {
                     pos = gate_data.center, max_hear_distance = 30, gain = 0.6
                 })
+            elseif not is_linked and not was_linked then
+                -- Not linked locally AND not linked on proxy — make sure
+                -- any leftover event horizon nodes are gone (desync cleanup)
+                remove_event_horizon(gate_data.pos)
             end
         end)
     end
