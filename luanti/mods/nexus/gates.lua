@@ -906,22 +906,81 @@ end
 core.register_node(HORIZON_NODE, {
     description = "Event Horizon",
     tiles = {{
-        name = "nexus_event_horizon.png",
-        animation = {type = "vertical_frames", aspect_w = 16, aspect_h = 16, length = 3},
+        name = "nexus_event_horizon_anim.png",
+        animation = {type = "vertical_frames", aspect_w = 16, aspect_h = 16, length = 1.5},
     }},
-    drawtype = "glasslike",
+    drawtype = "allfaces",
     paramtype = "light",
+    use_texture_alpha = "blend",
     groups = {not_in_creative_inventory = 1, unbreakable = 1},
-    light_source = 12,
+    light_source = 14,
     walkable = false,
     pointable = false,
     diggable = false,
     drop = "",
-    post_effect_color = {a = 120, r = 30, g = 80, b = 200},  -- bluish tint when inside
-    -- NOTE: no on_construct that removes the node — that was the bug.
-    -- The node is already restricted via groups (not_in_creative_inventory,
-    -- diggable=false) and only placed by the gate system via set_node.
+    post_effect_color = {a = 100, r = 30, g = 60, b = 180},
+    -- No on_construct (was a bug that deleted the node)
 })
+
+-- Portal particle effect: glowing particles swirl inside active gates
+-- Tracked per-gate so we can clean up when the portal closes
+local portal_particles = {}
+
+local function start_portal_particles(base_pos)
+    local center = get_center(base_pos)
+    -- Find all event horizon nodes in the portal
+    local positions = {}
+    for _, off in ipairs(PORTAL_OFFSETS) do
+        local p = {x = base_pos.x + off[1], y = base_pos.y + off[2], z = base_pos.z + off[3]}
+        if core.get_node(p).name == HORIZON_NODE then
+            positions[#positions+1] = p
+        end
+    end
+    if #positions == 0 then return end
+
+    -- One continuous spawner across the portal volume
+    local id = core.add_particlespawner({
+        amount = 30,
+        time = 0,
+        -- Spawn within the portal area
+        minpos = {x = center.x - 2, y = center.y - 2, z = center.z - 0.5},
+        maxpos = {x = center.x + 2, y = center.y + 2, z = center.z + 0.5},
+        -- Gentle upward drift with slight horizontal swirl
+        minvel = {x = -0.5, y = 0.5, z = -0.2},
+        maxvel = {x = 0.5, y = 1.5, z = 0.2},
+        minacc = {x = 0, y = 0, z = 0},
+        maxacc = {x = 0, y = 0.2, z = 0},
+        minexptime = 1.0,
+        maxexptime = 2.5,
+        minsize = 0.5,
+        maxsize = 2.0,
+        texture = "nexus_portal_particle.png",
+        glow = 14,
+    })
+    local address = core.get_meta(base_pos):get_string("address")
+    portal_particles[address] = id
+end
+
+local function stop_portal_particles(base_pos)
+    local address = core.get_meta(base_pos):get_string("address")
+    if portal_particles[address] then
+        core.delete_particlespawner(portal_particles[address])
+        portal_particles[address] = nil
+    end
+end
+
+-- Wrap place/remove event horizon to start/stop particles
+local _place_eh = place_event_horizon
+place_event_horizon = function(base_pos)
+    _place_eh(base_pos)
+    start_portal_particles(base_pos)
+end
+
+local _remove_eh = remove_event_horizon
+remove_event_horizon = function(base_pos)
+    _remove_eh(base_pos)
+    stop_portal_particles(base_pos)
+end
 
 -- Re-register gates on server restart (LBM fires for loaded nodes)
 core.register_lbm({
