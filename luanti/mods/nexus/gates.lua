@@ -969,10 +969,11 @@ local function reregister_gates()
 end
 
 core.register_on_mods_loaded(function()
-    -- Try immediately, then retry at 1s and 3s in case the proxy wasn't ready
-    reregister_gates()
+    -- Defer all registration attempts — map isn't available during on_mods_loaded.
+    -- Try at 1s, 3s, and 5s to cover proxy startup timing.
     core.after(1, reregister_gates)
     core.after(3, reregister_gates)
+    core.after(5, reregister_gates)
 end)
 
 -- =============================================================================
