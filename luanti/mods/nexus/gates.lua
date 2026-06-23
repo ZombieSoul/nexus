@@ -466,7 +466,6 @@ local function register_gate_at(pos)
 end
 
 local function remove_event_horizon(base_pos)
-                stop_portal_particles(base_pos)
     for _, off in ipairs(PORTAL_OFFSETS) do
         local p = {x = base_pos.x + off[1], y = base_pos.y + off[2], z = base_pos.z + off[3]}
         local node = core.get_node(p)
@@ -493,7 +492,6 @@ local function unregister_gate_at(pos)
 
     -- Remove event horizon
     remove_event_horizon(pos)
-    stop_portal_particles(pos)
 
     local_gates[address] = nil
     linked_gates[address] = nil
@@ -887,7 +885,6 @@ local function keystone_destruct_handler(pos)
             local kp = {x = base_pos.x + off[1], y = base_pos.y + off[2], z = base_pos.z + off[3]}
             if vector.equals(kp, pos) then
                 remove_event_horizon(base_pos)
-                stop_portal_particles(base_pos)
                 -- Remove all keystones
                 for _, off2 in ipairs(KEYSTONE_OFFSETS) do
                     local p = {x = base_pos.x + off2[1], y = base_pos.y + off2[2], z = base_pos.z + off2[3]}
@@ -926,12 +923,7 @@ core.register_node(HORIZON_NODE, {
     post_effect_color = {a = 100, r = 30, g = 60, b = 180},
 })
 
--- Portal particles disabled — invisible inside alpha-blended blocks.
--- The animated water-style texture provides the visual interest.
-local portal_particles = {}
 
-local function start_portal_particles(base_pos) end
-local function stop_portal_particles(base_pos) end
 
 -- Re-register gates on server restart (LBM fires for loaded nodes)
 core.register_lbm({
@@ -1095,7 +1087,6 @@ core.register_on_player_receive_fields(function(player, formname, fields)
                     dialing_in_progress[address] = nil
                     linked_gates[address] = true
                     place_event_horizon(pos)
-                    start_portal_particles(pos)
                     core.chat_send_player(pname, "[nexus] Wormhole established!")
                     core.sound_play("nexus_gate_open", {
                         pos = pos, max_hear_distance = 30, gain = 0.8
@@ -1128,7 +1119,6 @@ core.register_on_player_receive_fields(function(player, formname, fields)
             linked_gates[address] = nil
     gate_link_tiers[address] = nil
             remove_event_horizon(pos)
-    stop_portal_particles(pos)
             reset_keystones(pos)
             if ok then
                 core.chat_send_player(pname, "[nexus] Wormhole closed.")
@@ -1435,7 +1425,6 @@ core.register_chatcommand("dial", {
                 local gate_data = local_gates[nearest_addr]
                 if gate_data then
                     place_event_horizon(gate_data.pos)
-                    start_portal_particles(gate_data.pos)
                     core.sound_play("nexus_gate_open", {
                         pos = gate_data.center or gate_data.pos,
                         max_hear_distance = 30, gain = 0.8
@@ -1507,7 +1496,6 @@ core.register_chatcommand("removegate", {
         end
         -- Remove event horizon
         remove_event_horizon(nearest_pos)
-        stop_portal_particles(nearest_pos)
         -- Remove base block
         if core.get_node(nearest_pos).name == GATE_NODE then
             core.remove_node(nearest_pos)
@@ -1606,8 +1594,6 @@ core.register_globalstep(function(dtime)
                 else
                     linked_gates[address] = true
                     place_event_horizon(gate_data.pos)
-                    start_portal_particles(gate_data.pos)
-                    start_portal_particles(gate_data.pos)
                     core.sound_play("nexus_gate_open", {
                         pos = gate_data.center, max_hear_distance = 30, gain = 0.6
                     })
@@ -1616,14 +1602,12 @@ core.register_globalstep(function(dtime)
                 linked_gates[address] = nil
                 gate_link_tiers[address] = nil
                 remove_event_horizon(gate_data.pos)
-                stop_portal_particles(gate_data.pos)
                 reset_keystones(gate_data.pos)
                 core.sound_play("nexus_gate_close", {
                     pos = gate_data.center, max_hear_distance = 30, gain = 0.6
                 })
             elseif not is_linked and not was_linked then
                 remove_event_horizon(gate_data.pos)
-                stop_portal_particles(gate_data.pos)
             end
         end)
     end
