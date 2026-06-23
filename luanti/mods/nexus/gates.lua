@@ -909,7 +909,9 @@ core.register_node(HORIZON_NODE, {
         name = "nexus_event_horizon_anim.png",
         animation = {type = "vertical_frames", aspect_w = 16, aspect_h = 16, length = 1.5},
     }},
-    drawtype = "allfaces",
+    -- glasslike connects adjacent same-type blocks and hides internal faces
+    -- (unlike allfaces which renders every face, showing walls through alpha)
+    drawtype = "glasslike",
     paramtype = "light",
     use_texture_alpha = "blend",
     groups = {not_in_creative_inventory = 1, unbreakable = 1},
@@ -919,45 +921,35 @@ core.register_node(HORIZON_NODE, {
     diggable = false,
     drop = "",
     post_effect_color = {a = 100, r = 30, g = 60, b = 180},
-    -- No on_construct (was a bug that deleted the node)
 })
 
--- Portal particle effect: glowing particles swirl inside active gates
--- Tracked per-gate so we can clean up when the portal closes
+-- Portal particle effect: glowing particles drift inside active gates
 local portal_particles = {}
 
 local function start_portal_particles(base_pos)
-    local center = get_center(base_pos)
-    -- Find all event horizon nodes in the portal
-    local positions = {}
-    for _, off in ipairs(PORTAL_OFFSETS) do
-        local p = {x = base_pos.x + off[1], y = base_pos.y + off[2], z = base_pos.z + off[3]}
-        if core.get_node(p).name == HORIZON_NODE then
-            positions[#positions+1] = p
-        end
-    end
-    if #positions == 0 then return end
+    local address = core.get_meta(base_pos):get_string("address")
+    -- Guard: don't create if already running
+    if portal_particles[address] then return end
 
-    -- One continuous spawner across the portal volume
+    local center = get_center(base_pos)
     local id = core.add_particlespawner({
-        amount = 30,
-        time = 0,
-        -- Spawn within the portal area
-        minpos = {x = center.x - 2, y = center.y - 2, z = center.z - 0.5},
-        maxpos = {x = center.x + 2, y = center.y + 2, z = center.z + 0.5},
-        -- Gentle upward drift with slight horizontal swirl
-        minvel = {x = -0.5, y = 0.5, z = -0.2},
-        maxvel = {x = 0.5, y = 1.5, z = 0.2},
-        minacc = {x = 0, y = 0, z = 0},
-        maxacc = {x = 0, y = 0.2, z = 0},
-        minexptime = 1.0,
-        maxexptime = 2.5,
-        minsize = 0.5,
-        maxsize = 2.0,
+        amount = 40,
+        time = 0,  -- infinite lifespan
+        minpos = {x = center.x - 2, y = center.y - 2, z = center.z - 0.3},
+        maxpos = {x = center.x + 2, y = center.y + 2, z = center.z + 0.3},
+        -- Random multi-directional drift (not all going same way)
+        minvel = {x = -1.5, y = -0.5, z = -0.8},
+        maxvel = {x = 1.5, y = 1.5, z = 0.8},
+        minacc = {x = 0, y = -0.3, z = 0},
+        maxacc = {x = 0, y = 0.3, z = 0},
+        minexptime = 0.8,
+        maxexptime = 2.0,
+        minsize = 0.3,
+        maxsize = 1.5,
         texture = "nexus_portal_particle.png",
         glow = 14,
+        -- Add slight transparency variation via texture mod
     })
-    local address = core.get_meta(base_pos):get_string("address")
     portal_particles[address] = id
 end
 
@@ -969,7 +961,7 @@ local function stop_portal_particles(base_pos)
     end
 end
 
--- Wrap place/remove event horizon to start/stop particles
+-- Wrap place/remove to manage particles
 local _place_eh = place_event_horizon
 place_event_horizon = function(base_pos)
     _place_eh(base_pos)
