@@ -466,6 +466,7 @@ local function register_gate_at(pos)
 end
 
 local function remove_event_horizon(base_pos)
+                stop_portal_particles(base_pos)
     for _, off in ipairs(PORTAL_OFFSETS) do
         local p = {x = base_pos.x + off[1], y = base_pos.y + off[2], z = base_pos.z + off[3]}
         local node = core.get_node(p)
@@ -492,6 +493,7 @@ local function unregister_gate_at(pos)
 
     -- Remove event horizon
     remove_event_horizon(pos)
+    stop_portal_particles(pos)
 
     local_gates[address] = nil
     linked_gates[address] = nil
@@ -885,6 +887,7 @@ local function keystone_destruct_handler(pos)
             local kp = {x = base_pos.x + off[1], y = base_pos.y + off[2], z = base_pos.z + off[3]}
             if vector.equals(kp, pos) then
                 remove_event_horizon(base_pos)
+                stop_portal_particles(base_pos)
                 -- Remove all keystones
                 for _, off2 in ipairs(KEYSTONE_OFFSETS) do
                     local p = {x = base_pos.x + off2[1], y = base_pos.y + off2[2], z = base_pos.z + off2[3]}
@@ -924,33 +927,30 @@ core.register_node(HORIZON_NODE, {
 })
 
 -- Portal particle effect: glowing particles drift inside active gates
-local portal_particles = {}
+-- Managed directly in the link-state poller (not via wrapping) to avoid
+-- async race conditions and closure capture issues.
+local portal_particles = {}  -- address → particle spawner id
 
 local function start_portal_particles(base_pos)
     local address = core.get_meta(base_pos):get_string("address")
-    -- Guard: don't create if already running
-    if portal_particles[address] then return end
-
+    if portal_particles[address] then return end  -- already running
     local center = get_center(base_pos)
-    local id = core.add_particlespawner({
-        amount = 40,
-        time = 0,  -- infinite lifespan
-        minpos = {x = center.x - 2, y = center.y - 2, z = center.z - 0.3},
-        maxpos = {x = center.x + 2, y = center.y + 2, z = center.z + 0.3},
-        -- Random multi-directional drift (not all going same way)
-        minvel = {x = -1.5, y = -0.5, z = -0.8},
-        maxvel = {x = 1.5, y = 1.5, z = 0.8},
-        minacc = {x = 0, y = -0.3, z = 0},
-        maxacc = {x = 0, y = 0.3, z = 0},
-        minexptime = 0.8,
-        maxexptime = 2.0,
-        minsize = 0.3,
-        maxsize = 1.5,
+    portal_particles[address] = core.add_particlespawner({
+        amount = 25,
+        time = 0,
+        minpos = {x = center.x - 2.5, y = center.y - 2.5, z = center.z - 0.3},
+        maxpos = {x = center.x + 2.5, y = center.y + 2.5, z = center.z + 0.3},
+        minvel = {x = -1, y = -0.5, z = -0.5},
+        maxvel = {x = 1, y = 1, z = 0.5},
+        minacc = {x = 0, y = 0, z = 0},
+        maxacc = {x = 0, y = 0.1, z = 0},
+        minexptime = 1.5,
+        maxexptime = 3.0,
+        minsize = 0.2,
+        maxsize = 0.8,
         texture = "nexus_portal_particle.png",
         glow = 14,
-        -- Add slight transparency variation via texture mod
     })
-    portal_particles[address] = id
 end
 
 local function stop_portal_particles(base_pos)
@@ -959,19 +959,6 @@ local function stop_portal_particles(base_pos)
         core.delete_particlespawner(portal_particles[address])
         portal_particles[address] = nil
     end
-end
-
--- Wrap place/remove to manage particles
-local _place_eh = place_event_horizon
-place_event_horizon = function(base_pos)
-    _place_eh(base_pos)
-    start_portal_particles(base_pos)
-end
-
-local _remove_eh = remove_event_horizon
-remove_event_horizon = function(base_pos)
-    _remove_eh(base_pos)
-    stop_portal_particles(base_pos)
 end
 
 -- Re-register gates on server restart (LBM fires for loaded nodes)
@@ -1136,6 +1123,7 @@ core.register_on_player_receive_fields(function(player, formname, fields)
                     dialing_in_progress[address] = nil
                     linked_gates[address] = true
                     place_event_horizon(pos)
+                    start_portal_particles(pos)
                     core.chat_send_player(pname, "[nexus] Wormhole established!")
                     core.sound_play("nexus_gate_open", {
                         pos = pos, max_hear_distance = 30, gain = 0.8
@@ -1168,6 +1156,7 @@ core.register_on_player_receive_fields(function(player, formname, fields)
             linked_gates[address] = nil
     gate_link_tiers[address] = nil
             remove_event_horizon(pos)
+    stop_portal_particles(pos)
             reset_keystones(pos)
             if ok then
                 core.chat_send_player(pname, "[nexus] Wormhole closed.")
@@ -1474,6 +1463,7 @@ core.register_chatcommand("dial", {
                 local gate_data = local_gates[nearest_addr]
                 if gate_data then
                     place_event_horizon(gate_data.pos)
+                    start_portal_particles(gate_data.pos)
                     core.sound_play("nexus_gate_open", {
                         pos = gate_data.center or gate_data.pos,
                         max_hear_distance = 30, gain = 0.8
@@ -1545,6 +1535,7 @@ core.register_chatcommand("removegate", {
         end
         -- Remove event horizon
         remove_event_horizon(nearest_pos)
+        stop_portal_particles(nearest_pos)
         -- Remove base block
         if core.get_node(nearest_pos).name == GATE_NODE then
             core.remove_node(nearest_pos)
@@ -1643,6 +1634,8 @@ core.register_globalstep(function(dtime)
                 else
                     linked_gates[address] = true
                     place_event_horizon(gate_data.pos)
+                    start_portal_particles(gate_data.pos)
+                    start_portal_particles(gate_data.pos)
                     core.sound_play("nexus_gate_open", {
                         pos = gate_data.center, max_hear_distance = 30, gain = 0.6
                     })
@@ -1651,14 +1644,14 @@ core.register_globalstep(function(dtime)
                 linked_gates[address] = nil
                 gate_link_tiers[address] = nil
                 remove_event_horizon(gate_data.pos)
+                stop_portal_particles(gate_data.pos)
                 reset_keystones(gate_data.pos)
                 core.sound_play("nexus_gate_close", {
                     pos = gate_data.center, max_hear_distance = 30, gain = 0.6
                 })
             elseif not is_linked and not was_linked then
-                -- Not linked locally AND not linked on proxy — make sure
-                -- any leftover event horizon nodes are gone (desync cleanup)
                 remove_event_horizon(gate_data.pos)
+                stop_portal_particles(gate_data.pos)
             end
         end)
     end
