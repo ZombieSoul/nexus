@@ -910,7 +910,7 @@ core.register_node(HORIZON_NODE, {
     description = "Event Horizon",
     tiles = {{
         name = "nexus_event_horizon_anim.png",
-        animation = {type = "vertical_frames", aspect_w = 16, aspect_h = 16, length = 1.5},
+        animation = {type = "vertical_frames", aspect_w = 16, aspect_h = 16, length = 4},
     }},
     -- glasslike connects adjacent same-type blocks and hides internal faces
     -- (unlike allfaces which renders every face, showing walls through alpha)
@@ -936,18 +936,18 @@ local function start_portal_particles(base_pos)
     if portal_particles[address] then return end  -- already running
     local center = get_center(base_pos)
     portal_particles[address] = core.add_particlespawner({
-        amount = 25,
+        amount = 15,
         time = 0,
-        minpos = {x = center.x - 2.5, y = center.y - 2.5, z = center.z - 0.3},
-        maxpos = {x = center.x + 2.5, y = center.y + 2.5, z = center.z + 0.3},
-        minvel = {x = -1, y = -0.5, z = -0.5},
-        maxvel = {x = 1, y = 1, z = 0.5},
+        minpos = {x = center.x - 2, y = center.y - 2, z = center.z - 0.2},
+        maxpos = {x = center.x + 2, y = center.y + 2, z = center.z + 0.2},
+        minvel = {x = -0.3, y = -0.2, z = -0.1},
+        maxvel = {x = 0.3, y = 0.3, z = 0.1},
         minacc = {x = 0, y = 0, z = 0},
-        maxacc = {x = 0, y = 0.1, z = 0},
-        minexptime = 1.5,
-        maxexptime = 3.0,
+        maxacc = {x = 0, y = 0.05, z = 0},
+        minexptime = 2.0,
+        maxexptime = 4.0,
         minsize = 0.2,
-        maxsize = 0.8,
+        maxsize = 0.6,
         texture = "nexus_portal_particle.png",
         glow = 14,
     })
