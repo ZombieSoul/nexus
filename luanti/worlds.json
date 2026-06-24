@@ -1,0 +1,63 @@
+{
+    "_comment": "World definitions for the nexus game. Each world is a separate Luanti server.",
+    "_format": {
+        "galaxy": "Which galaxy this world belongs to",
+        "tier": "Power tier (0=home, 1=easy, 2=medium, 3=hard)",
+        "mapgen": "Luanti mapgen settings",
+        "ores": "Which nexus_power ores generate here",
+        "ruins": "Ancient gate ruin settings",
+        "hazards": "Environmental dangers",
+        "time_speed": "In-game hours per real hour (72 = 20min day)",
+        "port": "Server port for this world"
+    },
+    "worlds": {
+        "earth": {
+            "galaxy": "milkyway",
+            "galaxy_label": "Milky Way",
+            "tier": 0,
+            "description": "Home world — temperate forests, familiar terrain",
+            "port": 30000,
+            "mapgen": {
+                "terrain": "singlenode",
+                "seed": 12345,
+                "water_level": 1
+            },
+            "ores": ["resonite"],
+            "ruins": { "enabled": true, "spacing": 32, "tier": 1 },
+            "hazards": [],
+            "time_speed": 72
+        },
+        "abydos": {
+            "galaxy": "milkyway",
+            "galaxy_label": "Milky Way",
+            "tier": 1,
+            "description": "Desert world — arid dunes, first destination",
+            "port": 30002,
+            "mapgen": {
+                "terrain": "singlenode",
+                "seed": 67890,
+                "water_level": -10
+            },
+            "ores": ["resonite", "stellarite"],
+            "ruins": { "enabled": true, "spacing": 24, "tier": 2 },
+            "hazards": ["heat"],
+            "time_speed": 72
+        },
+        "proxima": {
+            "galaxy": "andromeda",
+            "galaxy_label": "Andromeda",
+            "tier": 3,
+            "description": "Alien world — dense biosphere, dangerous fauna",
+            "port": 30001,
+            "mapgen": {
+                "terrain": "singlenode",
+                "seed": 99999,
+                "water_level": 0
+            },
+            "ores": ["resonite", "stellarite", "voidium"],
+            "ruins": { "enabled": true, "spacing": 16, "tier": 3 },
+            "hazards": ["toxic_fog"],
+            "time_speed": 144
+        }
+    }
+}
