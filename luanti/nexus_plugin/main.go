@@ -248,6 +248,8 @@ func startHTTPServer() {
 	// World management endpoints
 	mux.HandleFunc("/nexus/world", requireAuth(handleWorldList))
 	mux.HandleFunc("/nexus/world/", requireAuth(handleWorldAction))
+	// Glyph lookup endpoint
+	mux.HandleFunc("/nexus/glyphs/lookup", requireAuth(handleGlyphLookup))
 
 	addr := config.APIBind + ":" + config.APIPort
 	server := &http.Server{

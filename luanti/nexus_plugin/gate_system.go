@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -483,6 +484,47 @@ func handleLinkAddress(w http.ResponseWriter, r *http.Request) {
 // --- Item Transfer Handlers ---
 
 // handleItem handles POST /nexus/item (send an item through a link)
+
+// handleGlyphLookup handles POST /nexus/glyphs/lookup
+// Finds a gate matching a glyph sequence.
+func handleGlyphLookup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		writeError(w, 405, "METHOD_NOT_ALLOWED", "Use POST")
+		return
+	}
+	var req struct {
+		Glyphs []int `json:"glyphs"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "BAD_REQUEST", "Invalid JSON: "+err.Error())
+		return
+	}
+	if len(req.Glyphs) == 0 {
+		writeError(w, 400, "BAD_REQUEST", "Missing 'glyphs' array")
+		return
+	}
+
+	// Convert 1-based Lua indices to 0-based Go indices
+	goGlyphs := make([]int, len(req.Glyphs))
+	for i, g := range req.Glyphs {
+		goGlyphs[i] = g - 1
+	}
+
+	gate, _ := gateSys.FindByGlyphs(goGlyphs)
+	if gate == nil {
+		writeError(w, 404, "NO_MATCH", "No gate found for this glyph sequence")
+		return
+	}
+
+	writeJSON(w, 200, map[string]interface{}{
+		"ok":      true,
+		"address": gate.Address,
+		"galaxy":  gate.Galaxy,
+		"world":   gate.World,
+		"label":   gate.Label,
+	})
+}
+
 func handleItem(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		writeError(w, 405, "METHOD_NOT_ALLOWED", "Use POST")
@@ -535,4 +577,75 @@ func handleItemAddress(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, 405, "METHOD_NOT_ALLOWED", "Use GET")
 	}
+}
+
+// --- Glyph Lookup ---
+
+// GateGlyphMatch finds a gate whose glyph sequence matches the given indices.
+// The glyph sequence is computed deterministically from the gate's route.
+func (gs *GateSystem) FindByGlyphs(indices []int) (*Gate, []int) {
+	gs.mu.RLock()
+	defer gs.mu.RUnlock()
+	for _, gate := range gs.gates {
+		gateIndices := ComputeGateGlyphs(gate)
+		if glyphMatch(gateIndices, indices) {
+			return gate, gateIndices
+		}
+	}
+	return nil, nil
+}
+
+// ComputeGateGlyphs converts a gate's address to a glyph sequence.
+// This mirrors the Lua route_to_glyphs logic.
+func ComputeGateGlyphs(gate *Gate) []int {
+	// Parse the address: galaxy:world:gate_id
+	parts := strings.SplitN(gate.Address, ":", 3)
+	if len(parts) < 3 {
+		return nil
+	}
+	galaxy := parts[0]
+	world := parts[1]
+	gateID := parts[2]
+
+	// Determine glyph count (always 7 for storage — we match any prefix)
+	// Generate all 7 and let the caller match partial sequences
+	result := make([]int, 7)
+	result[0] = hashStep(galaxy, 1001)
+	result[1] = hashStep(galaxy, 2002)
+	result[2] = hashStep(world, 3003)
+	result[3] = hashStep(world, 4004)
+	result[4] = hashStep(gateID, 5005)
+	result[5] = hashStep(gateID, 6006)
+	result[6] = hashStep(galaxy+world+gateID, 7007)
+	return result
+}
+
+func hashStep(s string, salt int) int {
+	h := salt
+	for i := 0; i < len(s); i++ {
+		h = (h*31 + int(s[i])) % 2147483647
+	}
+	return (h % 12) // 0-based for Go
+}
+
+// glyphMatch checks if the dialed indices match the gate's glyph sequence.
+// Handles prefix matching: a 3-glyph dial matches the first 3 of a 7-glyph
+// gate if the gate is same-world. We match exact sequences (3, 5, or 7).
+func glyphMatch(gateGlyphs, dialed []int) bool {
+	if len(dialed) > len(gateGlyphs) {
+		return false
+	}
+	// For 3-glyph dial: match gateGlyphs[4..6] (same-world portion)
+	// For 5-glyph dial: match gateGlyphs[2..6] (same-galaxy portion)
+	// For 7-glyph dial: match all 7
+	offset := len(gateGlyphs) - len(dialed)
+	if offset < 0 {
+		return false
+	}
+	for i := range dialed {
+		if gateGlyphs[offset+i] != dialed[i] {
+			return false
+		}
+	}
+	return true
 }

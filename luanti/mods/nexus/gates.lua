@@ -1108,12 +1108,61 @@ core.register_on_player_receive_fields(function(player, formname, fields)
             core.sound_play("nexus_gate_dial", {to_player = pname})
 
             -- Query the proxy for a gate matching this glyph sequence
-            -- For now we try all registered gates on this server
-            dest = nil  -- Will be set if we find a match
-            -- TODO: The proxy needs a glyph lookup endpoint
-            -- For now, fall through to text-based lookup
+            local payload = core.write_json({glyphs = indices})
+            nexus._http({
+                url = PROXY .. "/nexus/glyphs/lookup",
+                method = "POST",
+                data = payload,
+                timeout = TIMEOUT,
+                extra_headers = {"Content-Type: application/json"},
+            }, function(result)
+                if result.code == 200 then
+                    local resp = core.parse_json(result.data)
+                    if resp and resp.ok and resp.address then
+                        core.chat_send_player(pname, "[nexus] Address matched: " ..
+                            (resp.label or resp.address))
+                        -- Dial it
+                        local route = address_to_route(resp.address)
+                        local tier, tier_label = nexus.power.tier_for(
+                            GALAXY, WORLD,
+                            (route and route.galaxy) or GALAXY,
+                            (route and route.world) or WORLD)
+                        local can_afford, perr = nexus.power.check(address, tier)
+                        if not can_afford then
+                            core.chat_send_player(pname, "[nexus] " .. perr)
+                            return
+                        end
+                        nexus.gate.establish_link(address, resp.address, pname, function(ok, info)
+                            if ok then
+                                local dial_symbols = compute_dial_sequence(resp.address, tier)
+                                dialing_in_progress[address] = true
+                                play_dialing_sequence(pos, dial_symbols, tier, function()
+                                    dialing_in_progress[address] = nil
+                                    linked_gates[address] = true
+                                    place_event_horizon(pos)
+                                    gate_link_tiers[address] = tier
+                                    nexus.power.consume(address, tier)
+                                    core.chat_send_player(pname, "[nexus] Wormhole established!")
+                                    core.sound_play("nexus_gate_open", {
+                                        pos = pos, max_hear_distance = 30, gain = 0.8
+                                    })
+                                end)
+                            else
+                                core.chat_send_player(pname, "[nexus] Dialing failed: " ..
+                                    tostring(info))
+                            end
+                        end)
+                    end
+                else
+                    local resp = core.parse_json(result.data)
+                    local msg = (resp and resp.message) or "No response"
+                    core.chat_send_player(pname, "[nexus] " .. msg)
+                    core.sound_play("nexus_gate_abort", {to_player = pname})
+                end
+            end)
 
             pmeta:set_string("nexus_dial_seq", "")
+            return true
         end
 
         -- Text-based fallback (for crystals that store text addresses)
