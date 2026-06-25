@@ -668,7 +668,7 @@ local function show_gate_formspec(pos, player)
 
     local parts = {
         "formspec_version[4]",
-        "size[12,15.5]",
+        "size[12,18.5]",
         -- NO no_prepend — let Mineclonia's background theme apply
         string.format("label[4.5,0.4;%s]", title),
         string.format(
@@ -746,14 +746,30 @@ local function show_gate_formspec(pos, player)
 
     -- ── Manual dial section ──
     parts[#parts+1] = "label[0.4,7.2;Manual Dial]"
-    parts[#parts+1] = "field[0.4,7.9;7.5,0.9;dest;Destination Address;]"
+    parts[#parts+1] = string.format("field[0.4,7.9;7.5,0.9;dest;Destination Address;%s]",
+        fields and fields.dial_sequence or "")
     parts[#parts+1] = "button[0.4,8.9;3.5,0.8;dial;Dial]"
-    parts[#parts+1] = "button[4.1,8.9;3.5,0.8;close;Close Link]"
+    parts[#parts+1] = "button[4.1,8.9;3.5,0.8;clear_dial;Clear]"
+    parts[#parts+1] = "button[7.8,8.9;3.5,0.8;close;Close Link]"
+
+    -- Glyph dial pad (12 symbol buttons in a 4x3 grid)
+    local pad_y = 10.0
+    parts[#parts+1] = "label[0.4,9.7;Symbols]"
+    local all_glyphs = nexus.glyphs.get_all()
+    for i, g in ipairs(all_glyphs) do
+        local col = (i - 1) % 4
+        local row = math.floor((i - 1) / 4)
+        local bx = 0.4 + col * 1.3
+        local by = pad_y + row * 1.0
+        parts[#parts+1] = string.format(
+            "image_button[%f,%f;1,1;nexus_glyph_off_%s.png;glyph_%d;%s]",
+            bx, by, g.name, i, g.symbol)
+    end
 
     -- ── Inventory section ──
-    parts[#parts+1] = "label[0.4,10.0;Inventory]"
-    parts[#parts+1] = islot(1, 10.4, 8, 4)
-    parts[#parts+1] = string.format("list[current_player;main;1,10.4;8,4;]")
+    parts[#parts+1] = "label[0.4,13.5;Inventory]"
+    parts[#parts+1] = islot(1, 13.9, 8, 4)
+    parts[#parts+1] = string.format("list[current_player;main;1,13.9;8,4;]")
     parts[#parts+1] = string.format("listring[nodemeta:%d,%d,%d;crystal]", pos.x, pos.y, pos.z)
     parts[#parts+1] = "listring[current_player;main]"
 
@@ -1015,6 +1031,39 @@ core.register_on_player_receive_fields(function(player, formname, fields)
 
     -- Handle crystal address button clicks (numeric index → actual address)
     local dial_addr = nil
+
+    -- Handle glyph dial pad clicks — build up the sequence
+    local glyph_sequence = pmeta:get_string("nexus_dial_seq") or ""
+    if fields.clear_dial then
+        glyph_sequence = ""
+        pmeta:set_string("nexus_dial_seq", "")
+        pmeta:set_string("nexus_dial_indices", "")
+        show_gate_formspec(pos, player)
+        return true
+    end
+
+    for field_name in pairs(fields) do
+        local glyph_idx = field_name:match("^glyph_(%d+)$")
+        if glyph_idx then
+            local idx = tonumber(glyph_idx)
+            -- Add to sequence (max 7 glyphs)
+            if #glyph_sequence < 14 then  -- "1,2,3" format, 7 entries
+                if glyph_sequence ~= "" then
+                    glyph_sequence = glyph_sequence .. ","
+                end
+                glyph_sequence = glyph_sequence .. idx
+                pmeta:set_string("nexus_dial_seq", glyph_sequence)
+                -- Play a dial sound per glyph
+                core.sound_play("nexus_gate_dial", {
+                    pos = pos, max_hear_distance = 20, gain = 0.3,
+                    pitch = 0.8 + (idx / 12) * 0.4,
+                })
+            end
+            show_gate_formspec(pos, player)
+            return true
+        end
+    end
+
     for field_name in pairs(fields) do
         local clicked_idx = field_name:match("^addrbtn_(%d+)$")
         if clicked_idx then
@@ -1040,9 +1089,43 @@ core.register_on_player_receive_fields(function(player, formname, fields)
     end
 
     if dial_addr or fields.dial then
-        local dest = dial_addr or (fields.dest or ""):trim()
-        if dest == "" then
-            core.chat_send_player(pname, "[nexus] Enter a destination address")
+        local dest = dial_addr
+
+        -- If no crystal address was clicked, check for glyph sequence
+        if not dest and glyph_sequence ~= "" then
+            -- Convert glyph sequence to indices
+            local indices = {}
+            for idx_str in glyph_sequence:gmatch("(%d+)") do
+                indices[#indices+1] = tonumber(idx_str)
+            end
+
+            -- Try to find a matching registered gate
+            -- Query the proxy for all gates and match glyph sequences
+            -- For now: convert glyphs to a route guess and check
+            -- This is a simplified approach — the proxy will validate
+            local symbols = nexus.glyphs.get_colored_symbols(indices)
+            core.chat_send_player(pname, "[nexus] Dialing: " .. symbols)
+            core.sound_play("nexus_gate_dial", {to_player = pname})
+
+            -- Query the proxy for a gate matching this glyph sequence
+            -- For now we try all registered gates on this server
+            dest = nil  -- Will be set if we find a match
+            -- TODO: The proxy needs a glyph lookup endpoint
+            -- For now, fall through to text-based lookup
+
+            pmeta:set_string("nexus_dial_seq", "")
+        end
+
+        -- Text-based fallback (for crystals that store text addresses)
+        if not dest then
+            local typed = (fields.dest or ""):trim()
+            if typed ~= "" then
+                dest = typed
+            end
+        end
+
+        if not dest then
+            core.chat_send_player(pname, "[nexus] Enter a glyph sequence or insert a crystal")
             return true
         end
 

@@ -641,6 +641,8 @@ end
 
 dofile(modpath .. "/power.lua")
 
+dofile(modpath .. "/glyphs.lua")
+
 dofile(modpath .. "/crystals.lua")
 
 -- =============================================================================
