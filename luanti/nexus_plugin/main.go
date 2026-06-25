@@ -16,6 +16,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -36,10 +37,12 @@ var config = Config{
 
 // subsystems — initialized in init()
 var (
-	stateStore  StateStore
-	transferMgr *TransferManager
-	galaxyReg   *GalaxyRegistry
-	gateSys     *GateSystem
+	stateStore   StateStore
+	transferMgr  *TransferManager
+	galaxyReg    *GalaxyRegistry
+	gateSys      *GateSystem
+	worldReg     *WorldRegistry
+	serverMgr    *ServerManager
 )
 
 func init() {
@@ -65,6 +68,110 @@ func init() {
 	galaxyReg = NewGalaxyRegistry()
 	gateSys = NewGateSystem()
 
+	// Initialize world registry (SQLite — persists across restarts)
+	worldRegPath := proxy.Path("nexus_world_registry.db")
+	worldReg, err = NewWorldRegistry(worldRegPath)
+	if err != nil {
+		log.Println("[nexus] WARNING: world registry failed, dynamic worlds disabled:", err)
+		worldReg = nil
+	} else {
+		log.Println("[nexus] world registry loaded (SQLite)")
+		// Reset all world states to offline on startup (crash recovery)
+		worldReg.ResetAllWorldStates()
+	}
+
+	// Initialize server manager if world registry is available
+	if worldReg != nil {
+		// Load universe config
+		universePath := filepath.Join(filepath.Dir(filepath.Dir(proxy.Path(""))), "worlds.json")
+		universe, err := LoadUniverseConfig(universePath)
+		if err != nil {
+			log.Println("[nexus] WARNING: universe config not loaded, random worlds disabled:", err)
+			universe = &UniverseConfig{Galaxies: make(map[string]GalaxyConfig)}
+		} else {
+			// Populate static worlds from worlds.json into the registry
+			// This is idempotent — running multiple times just updates the records
+			universeData, _ := os.ReadFile(universePath)
+			var rawWorlds struct {
+				Worlds map[string]json.RawMessage `json:"worlds"`
+			}
+			json.Unmarshal(universeData, &rawWorlds)
+
+			worldsDir := filepath.Join(filepath.Dir(proxy.Path("")), "worlds")
+			configDir := filepath.Join(filepath.Dir(proxy.Path("")), "config")
+			count := 0
+			for name, raw := range rawWorlds.Worlds {
+				if name == "" {
+					continue
+				}
+				var w struct {
+					Galaxy      string   `json:"galaxy"`
+					GalaxyLabel string   `json:"galaxy_label"`
+					Tier        int      `json:"tier"`
+					Description string   `json:"description"`
+					Port        int      `json:"port"`
+					Mapgen      struct {
+						Seed       int64 `json:"seed"`
+						WaterLevel int   `json:"water_level"`
+					} `json:"mapgen"`
+					Ores        []string `json:"ores"`
+					Ruins       struct {
+						Enabled bool `json:"enabled"`
+						Spacing int  `json:"spacing"`
+						Tier    int  `json:"tier"`
+					} `json:"ruins"`
+					TimeSpeed int      `json:"time_speed"`
+					Hazards   []string `json:"hazards"`
+				}
+				if err := json.Unmarshal(raw, &w); err != nil {
+					log.Printf("[nexus] WARNING: failed to parse world %s: %v", name, err)
+					continue
+				}
+				record := &WorldRecord{
+					WorldName:   name,
+					Galaxy:      w.Galaxy,
+					Tier:        w.Tier,
+					WorldType:   "static",
+					Seed:        w.Mapgen.Seed,
+					WorldDir:    filepath.Join(worldsDir, name),
+					ConfigPath:  filepath.Join(configDir, name+".conf"),
+					Ores:        strings.Join(w.Ores, ","),
+					Hazards:     strings.Join(w.Hazards, ","),
+					TimeSpeed:   w.TimeSpeed,
+					RuinSpacing: w.Ruins.Spacing,
+					Description: w.Description,
+					CreatedAt:   time.Now().Unix(),
+				}
+				worldReg.UpsertWorld(record)
+				count++
+			}
+			log.Printf("[nexus] populated %d static worlds from worlds.json", count)
+		}
+
+		engineDir := filepath.Join(filepath.Dir(proxy.Path("")), "engine")
+		worldsDir := filepath.Join(filepath.Dir(proxy.Path("")), "worlds")
+		configDir := filepath.Join(filepath.Dir(proxy.Path("")), "config")
+
+		serverMgr = NewServerManager(ServerManagerConfig{
+			LuantiBinary:  filepath.Join(engineDir, "bin", "luantiserver"),
+			EngineDir:     engineDir,
+			WorldsDir:     worldsDir,
+			ConfigDir:     configDir,
+			GameID:        "mineclonia",
+			MinPort:       30010,
+			MaxPort:       30050,
+			MaxServers:    5,
+			BootTimeout:   60 * time.Second,
+			IdleTimeout:   5 * time.Minute,
+			ShutdownGrace: 60 * time.Second,
+			APISecret:     config.APISecret,
+			ProxyURL:      "http://127.0.0.1:" + config.APIPort,
+			MediaPool:     "mineclonia",
+		}, worldReg, universe)
+
+		serverMgr.Start()
+	}
+
 	// Register proxy lifecycle hooks
 	proxy.RegisterOnJoin(onClientJoin)
 	proxy.RegisterOnLeave(onClientLeave)
@@ -85,11 +192,21 @@ func authStatus() string {
 }
 
 // onClientJoin is called when a player connects to the proxy.
-// We don't do much here yet — the destination server's Lua mod
-// will call our HTTP API to retrieve state after the player hops.
 func onClientJoin(cc *proxy.ClientConn) string {
-	// Galaxy registration: the server this client just joined can
-	// register itself via HTTP. This is just informational.
+	// Update player count for the destination world
+	if serverMgr != nil && cc.ServerName() != "" {
+		// The player is connecting to a world — increment its count
+		// We do this asynchronously to avoid blocking the join
+		go func() {
+			worlds, _ := worldReg.ListWorlds()
+			for _, w := range worlds {
+				if w.WorldName == cc.ServerName() {
+					serverMgr.SetPlayerCount(w.WorldName, serverMgr.getPlayerCount(w.WorldName)+1)
+					break
+				}
+			}
+		}()
+	}
 	return ""
 }
 
@@ -97,6 +214,19 @@ func onClientJoin(cc *proxy.ClientConn) string {
 func onClientLeave(cc *proxy.ClientConn) {
 	name := cc.Name()
 	transferMgr.HandleDisconnect(name)
+
+	// Decrement player count for the world they were on
+	if serverMgr != nil {
+		go func() {
+			worlds, _ := worldReg.ListWorlds()
+			for _, w := range worlds {
+				if w.WorldName == cc.ServerName() {
+					serverMgr.SetPlayerCount(w.WorldName, serverMgr.getPlayerCount(w.WorldName)-1)
+					break
+				}
+			}
+		}()
+	}
 }
 
 // startHTTPServer runs the Nexus REST API.
@@ -115,6 +245,9 @@ func startHTTPServer() {
 	// Item transfer endpoints
 	mux.HandleFunc("/nexus/item", requireAuth(handleItem))
 	mux.HandleFunc("/nexus/item/", requireAuth(handleItemAddress))
+	// World management endpoints
+	mux.HandleFunc("/nexus/world", requireAuth(handleWorldList))
+	mux.HandleFunc("/nexus/world/", requireAuth(handleWorldAction))
 
 	addr := config.APIBind + ":" + config.APIPort
 	server := &http.Server{
@@ -317,6 +450,9 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 	galaxyReg.Register(&req.Galaxy)
 	log.Printf("[nexus] galaxy registered: %s (%s, tier %d)",
 		req.Galaxy.Name, req.Galaxy.Label, req.Galaxy.Tier)
+
+	// Notify server manager that this world is online
+	onGalaxyRegistered(req.Galaxy.Name)
 
 	writeJSON(w, 200, map[string]any{
 		"ok":      true,
