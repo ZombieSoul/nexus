@@ -1813,6 +1813,7 @@ core.register_globalstep(function(dtime)
                         })
                     elseif state == "idle" then
                         remove_event_horizon(gate_data.pos)
+                        reset_keystones(gate_data.pos)
                     end
                 end
             end)
