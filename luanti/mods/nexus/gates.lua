@@ -1799,7 +1799,8 @@ core.register_globalstep(function(dtime)
                         core.sound_play("nexus_gate_open", {
                             pos = gate_data.center, max_hear_distance = 30, gain = 0.6
                         })
-                    elseif state == "connected" then
+                    elseif state == "connected" or state == "receiving" then
+                        -- Ensure horizon exists (reconciliation)
                         place_event_horizon(gate_data.pos)
                     end
                 else
