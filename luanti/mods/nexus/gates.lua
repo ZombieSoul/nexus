@@ -1334,7 +1334,7 @@ core.register_globalstep(function(dtime)
     pad_timer = 0
 
     for address, gate_data in pairs(local_gates) do
-        if gate_state[address] == "connected" then
+        if gate_state[address] == "connected" or gate_state[address] == "receiving" then
             -- Check at feet level (y+1) where the player walks through the opening.
             -- The center at y+2 is too high — standing on the base block puts feet at y+1,
             -- which is 1 block below center and barely within the old 1.5 radius.
@@ -1469,7 +1469,7 @@ core.register_globalstep(function(dtime)
     item_sensor_timer = 0
 
     for address, gate_data in pairs(local_gates) do
-        if gate_state[address] == "connected" then
+        if gate_state[address] == "connected" or gate_state[address] == "receiving" then
             local pos = gate_data.center or gate_data.pos
             local objects = core.get_objects_inside_radius(pos, 1.5)
             for _, obj in ipairs(objects) do
@@ -1824,8 +1824,37 @@ core.register_globalstep(function(dtime)
                             pos = gate_data.center, max_hear_distance = 30, gain = 0.6
                         })
                     elseif state == "connected" or state == "receiving" then
-                        -- Ensure horizon exists (reconciliation)
+                        -- Reconciliation: ensure horizon + keystones exist
                         place_event_horizon(gate_data.pos)
+                        -- Light keystones if they're off (receiving gate)
+                        if link.remote_address then
+                            for _, off in ipairs(KEYSTONE_OFFSETS) do
+                                local kp = {x = gate_data.pos.x + off[1], y = gate_data.pos.y + off[2], z = gate_data.pos.z + off[3]}
+                                if core.get_node(kp).name == KEYSTONE_OFF then
+                                    -- Keystones are off but should be lit — light them
+                                    local remote_route = address_to_route(link.remote_address)
+                                    local my_galaxy = nexus._config.galaxy_name or ""
+                                    local my_world = nexus._config.world_name or ""
+                                    local remote_tier = nexus.power.tier_for(
+                                        my_galaxy, my_world,
+                                        (remote_route and remote_route.galaxy) or my_galaxy,
+                                        (remote_route and remote_route.world) or my_world)
+                                    local symbols = compute_dial_sequence(link.remote_address, remote_tier)
+                                    for i, sym_idx in ipairs(symbols) do
+                                        local ks_idx = ((i - 1) % 7) + 1
+                                        local ks_off = KEYSTONE_OFFSETS[ks_idx]
+                                        if ks_off then
+                                            local kp2 = {x = gate_data.pos.x + ks_off[1], y = gate_data.pos.y + ks_off[2], z = gate_data.pos.z + ks_off[3]}
+                                            local color = KEYSTONE_COLORS[sym_idx] or "white"
+                                            if core.get_node(kp2).name == KEYSTONE_OFF then
+                                                core.swap_node(kp2, {name = keystone_lit_name(color)})
+                                            end
+                                        end
+                                    end
+                                    break  -- only need to do this once per poll
+                                end
+                            end
+                        end
                     end
                 else
                     if state == "connected" or state == "receiving" then
