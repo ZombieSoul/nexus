@@ -534,14 +534,23 @@ local compute_dial_sequence, play_dialing_sequence, reset_keystones
 --- At the end, the link is established (or fails if address is invalid).
 start_dialing = function(pos, player, gate_address, dest_address)
     local pname = player:get_player_name()
+    core.log("action", "[nexus] start_dialing called: " .. gate_address .. " → " .. dest_address)
 
-    -- Don't allow if already dialing or linked
-    if gate_state[gate_address] == "dialing" then
+    -- Don't allow if already dialing or connected or receiving
+    local state = gate_state[gate_address] or "idle"
+    if state == "dialing" then
         core.chat_send_player(pname, "[nexus] Gate is already dialing")
+        core.log("action", "[nexus] start_dialing aborted: already dialing")
         return
     end
-    if gate_state[gate_address] == "connected" then
+    if state == "connected" then
         core.chat_send_player(pname, "[nexus] Gate is already linked — close the wormhole first")
+        core.log("action", "[nexus] start_dialing aborted: already connected")
+        return
+    end
+    if state == "receiving" then
+        core.chat_send_player(pname, "[nexus] This gate is receiving an incoming wormhole — close it first")
+        core.log("action", "[nexus] start_dialing aborted: receiving")
         return
     end
 
