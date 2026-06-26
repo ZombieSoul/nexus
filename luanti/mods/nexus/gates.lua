@@ -1747,8 +1747,12 @@ core.register_globalstep(function(dtime)
                         pos = gate_data.center, max_hear_distance = 30, gain = 0.6
                     })
                 elseif is_linked and was_linked then
-                    -- Reconcile: ensure horizon exists even if nodes were lost
-                    place_event_horizon(gate_data.pos)
+                    -- Reconcile: ensure horizon exists even if nodes were lost.
+                    -- BUT skip if this gate is currently dialing — the dialing
+                    -- sequence handles horizon placement when it completes.
+                    if not dialing_in_progress[address] then
+                        place_event_horizon(gate_data.pos)
+                    end
                 elseif not is_linked and not was_linked then
                     -- Both off — clean up any stray visuals
                     remove_event_horizon(gate_data.pos)
