@@ -504,7 +504,9 @@ local function unregister_gate_at(pos)
     core.log("action", "[nexus] gate destroyed: " .. address)
 end
 
--- The gate formspec
+-- Forward declarations for dialing flow (defined after keystone helpers)
+local start_dialing, cancel_dialing
+
 -- =============================================================================
 -- Unified Dialing Flow
 -- =============================================================================
@@ -522,7 +524,7 @@ end
 --- Start the full dialing flow for a destination address.
 --- Power is checked first. If sufficient, the visual sequence plays.
 --- At the end, the link is established (or fails if address is invalid).
-local function start_dialing(pos, player, gate_address, dest_address)
+start_dialing = function(pos, player, gate_address, dest_address)
     local pname = player:get_player_name()
 
     -- Don't allow if already dialing or linked
@@ -615,7 +617,7 @@ local function start_dialing(pos, player, gate_address, dest_address)
 end
 
 --- Cancel an in-progress dialing sequence.
-local function cancel_dialing(pos, player)
+cancel_dialing = function(pos, player)
     local meta = core.get_meta(pos)
     local address = meta:get_string("address")
 
