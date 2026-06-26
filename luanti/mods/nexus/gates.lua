@@ -1718,53 +1718,44 @@ core.register_globalstep(function(dtime)
 
     for address, gate_data in pairs(local_gates) do
         -- Skip if a query is already in-flight for this gate
-        if link_query_pending[address] then goto next_gate end
+        if not link_query_pending[address] then
+            link_query_pending[address] = true
 
-        nexus.gate.get_link(address, function(link)
-            link_query_pending[address] = false
+            nexus.gate.get_link(address, function(link)
+                link_query_pending[address] = false
 
-            local is_linked = link and link.linked
-            local was_linked = linked_gates[address] ~= nil
+                local is_linked = link and link.linked
+                local was_linked = linked_gates[address] ~= nil
 
-            if is_linked and not was_linked then
-                -- Link just appeared
-                if dialing_in_progress[address] then
-                    -- Dialing sequence handles visuals when it completes
-                    linked_gates[address] = true
-                else
-                    -- Incoming link detected — show visuals
-                    linked_gates[address] = true
-                    place_event_horizon(gate_data.pos)
-                    core.sound_play("nexus_gate_open", {
+                if is_linked and not was_linked then
+                    -- Link just appeared
+                    if dialing_in_progress[address] then
+                        linked_gates[address] = true
+                    else
+                        linked_gates[address] = true
+                        place_event_horizon(gate_data.pos)
+                        core.sound_play("nexus_gate_open", {
+                            pos = gate_data.center, max_hear_distance = 30, gain = 0.6
+                        })
+                    end
+                elseif not is_linked and was_linked then
+                    linked_gates[address] = nil
+                    gate_link_tiers[address] = nil
+                    remove_event_horizon(gate_data.pos)
+                    reset_keystones(gate_data.pos)
+                    core.sound_play("nexus_gate_close", {
                         pos = gate_data.center, max_hear_distance = 30, gain = 0.6
                     })
+                elseif is_linked and was_linked then
+                    -- Reconcile: ensure horizon exists even if nodes were lost
+                    place_event_horizon(gate_data.pos)
+                elseif not is_linked and not was_linked then
+                    -- Both off — clean up any stray visuals
+                    remove_event_horizon(gate_data.pos)
+                    reset_keystones(gate_data.pos)
                 end
-            elseif not is_linked and was_linked then
-                -- Link just disappeared
-                linked_gates[address] = nil
-                gate_link_tiers[address] = nil
-                remove_event_horizon(gate_data.pos)
-                reset_keystones(gate_data.pos)
-                core.sound_play("nexus_gate_close", {
-                    pos = gate_data.center, max_hear_distance = 30, gain = 0.6
-                })
-            elseif is_linked and was_linked then
-                -- State unchanged — RECONCILE visual state (fixes desync)
-                -- Ensure event horizon exists even if nodes were lost
-                place_event_horizon(gate_data.pos)
-                -- Keystones on the origin gate should match the dialed tier.
-                -- If this is the receiving gate, keystones stay unlit (only
-                -- the dialing gate lights them). We don't reset them here
-                -- because that would clear the origin gate's sequence.
-            elseif not is_linked and not was_linked then
-                -- Both off — clean up any stray visuals
-                remove_event_horizon(gate_data.pos)
-                reset_keystones(gate_data.pos)
-            end
-
-            ::next_gate::
-        end)
-        link_query_pending[address] = true
+            end)
+        end
     end
 end)
 
