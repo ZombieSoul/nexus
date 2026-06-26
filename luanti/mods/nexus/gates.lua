@@ -254,7 +254,8 @@ function nexus.gate.travel_player(player, gate_address)
         -- Power check: determine the tier and verify the gate can afford it.
         -- If nexus.power has no provider (or require_power=false), this
         -- always passes — gates are free.
-        local tier, tier_label = nexus.power.tier_for(
+        core.log("action", "[nexus] start_dialing: past state checks, checking power...")
+    local tier, tier_label = nexus.power.tier_for(
             GALAXY, WORLD, remote_galaxy or GALAXY, remote_world or WORLD)
         local can_afford, perr = nexus.power.check(gate_address, tier)
         if not can_afford then
@@ -573,6 +574,7 @@ start_dialing = function(pos, player, gate_address, dest_address)
         end)
     end
 
+    core.log("action", "[nexus] start_dialing: past state checks, checking power...")
     local tier, tier_label = nexus.power.tier_for(
         GALAXY, WORLD,
         (route and route.galaxy) or GALAXY,
@@ -585,13 +587,16 @@ start_dialing = function(pos, player, gate_address, dest_address)
     end
 
     -- Start the visual dialing sequence
+    core.log("action", "[nexus] start_dialing: power OK, computing sequence...")
     local symbols = compute_dial_sequence(dest_address, tier)
+    core.log("action", "[nexus] start_dialing: sequence starting (" .. #symbols .. " glyphs)")
     gate_state[gate_address] = "dialing"
 
     core.chat_send_player(pname, "[nexus] Dialing " .. dest_address ..
         " — " .. #symbols .. " symbols (" .. tier_label .. ")...")
 
     play_dialing_sequence(pos, symbols, tier, function()
+        core.log("action", "[nexus] start_dialing: sequence complete, establishing link...")
         -- Sequence complete — now try to establish the link
         if gate_state[gate_address] ~= "dialing" then
             -- Was cancelled during the sequence
@@ -600,10 +605,12 @@ start_dialing = function(pos, player, gate_address, dest_address)
 
         core.chat_send_player(pname, "[nexus] Establishing wormhole...")
 
+        core.log("action", "[nexus] start_dialing: calling establish_link " .. gate_address .. " -> " .. dest_address)
         nexus.gate.establish_link(gate_address, dest_address, pname, function(ok, info)
             if gate_state[gate_address] ~= "dialing" then
                 -- Was cancelled while waiting for link response
-                if ok then
+                core.log("action", "[nexus] start_dialing: establish_link result: ok=" .. tostring(ok))
+            if ok then
                     nexus.gate.close_link(gate_address)
                 end
                 return
@@ -611,6 +618,7 @@ start_dialing = function(pos, player, gate_address, dest_address)
 
             if gate_state[gate_address] == "dialing" then gate_state[gate_address] = "idle" end
 
+            core.log("action", "[nexus] start_dialing: establish_link result: ok=" .. tostring(ok))
             if ok then
                 -- Success! Open the wormhole
                 gate_state[gate_address] = "connected"
@@ -1155,7 +1163,8 @@ core.register_on_player_receive_fields(function(player, formname, fields)
     -- Handle PIN unlock
     if fields.unlock then
         local ok, err = nexus.crystal.try_unlock(pos, fields.gate_pin or "")
-        if ok then
+        core.log("action", "[nexus] start_dialing: establish_link result: ok=" .. tostring(ok))
+            if ok then
             core.chat_send_player(pname, "[nexus] Crystal unlocked.")
         else
             core.chat_send_player(pname, "[nexus] " .. (err or "Unlock failed."))
@@ -1290,6 +1299,7 @@ core.register_on_player_receive_fields(function(player, formname, fields)
             gate_link_tiers[address] = nil
             remove_event_horizon(pos)
             reset_keystones(pos)
+            core.log("action", "[nexus] start_dialing: establish_link result: ok=" .. tostring(ok))
             if ok then
                 core.chat_send_player(pname, "[nexus] Wormhole closed.")
                 core.sound_play("nexus_gate_close", {
@@ -1578,7 +1588,8 @@ core.register_chatcommand("dial", {
 
         -- Power check BEFORE dialing
         local route = address_to_route(dest)
-        local tier, tier_label = nexus.power.tier_for(
+        core.log("action", "[nexus] start_dialing: past state checks, checking power...")
+    local tier, tier_label = nexus.power.tier_for(
             GALAXY, WORLD,
             (route and route.galaxy) or GALAXY,
             (route and route.world) or WORLD)
@@ -1591,6 +1602,7 @@ core.register_chatcommand("dial", {
             " from " .. nearest_addr .. "...")
 
         nexus.gate.establish_link(nearest_addr, dest, name, function(ok, info)
+            core.log("action", "[nexus] start_dialing: establish_link result: ok=" .. tostring(ok))
             if ok then
                 gate_state[nearest_addr] = "connected"
                 -- Consume dial cost and track tier for upkeep
