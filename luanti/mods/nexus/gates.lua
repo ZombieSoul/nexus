@@ -1110,15 +1110,11 @@ local function reregister_gates()
                 z = tonumber(parts[3]),
             }
             if pos.x then
-                local node = core.get_node(pos)
-                if node.name == GATE_NODE then
-                    register_gate_at(pos)
-                    count = count + 1
-                else
-                    local address = key:sub(5)
-                    storage:set_string(key, "")
-                    core.log("action", "[nexus] cleaned up stale gate: " .. address)
-                end
+                -- Trust the storage — register from stored position.
+                -- Don't check the node (chunk may not be loaded/generated yet).
+                -- The LBM will re-validate when a player actually visits.
+                register_gate_at(pos)
+                count = count + 1
             end
         end
     end
@@ -1767,11 +1763,10 @@ local link_query_pending = {}
 local refresh_timer = 0
 core.register_globalstep(function(dtime)
     refresh_timer = refresh_timer + dtime
-    if refresh_timer < 2.0 then return end  -- every 2 seconds
+    if refresh_timer < 2.0 then return end
     refresh_timer = 0
 
     for address, gate_data in pairs(local_gates) do
-        -- Skip if a query is already in-flight for this gate
         if not link_query_pending[address] then
             link_query_pending[address] = true
 
@@ -1779,44 +1774,38 @@ core.register_globalstep(function(dtime)
                 link_query_pending[address] = false
 
                 local is_linked = link and link.linked
-                local was_linked = gate_state[address] == "connected"
+                local state = gate_state[address] or "idle"
 
-                if is_linked and not was_linked then
-                    -- Link just appeared
-                    if gate_state[address] == "dialing" then
-                        gate_state[address] = "connected"
-                    else
-                        gate_state[address] = "connected"
+                -- NEVER touch visuals while dialing
+                if state == "dialing" then return end
+
+                if is_linked then
+                    if state == "idle" then
+                        gate_state[address] = "receiving"
                         place_event_horizon(gate_data.pos)
                         core.sound_play("nexus_gate_open", {
                             pos = gate_data.center, max_hear_distance = 30, gain = 0.6
                         })
-                    end
-                elseif not is_linked and was_linked then
-                    gate_state[address] = "idle"
-                    gate_link_tiers[address] = nil
-                    remove_event_horizon(gate_data.pos)
-                    reset_keystones(gate_data.pos)
-                    core.sound_play("nexus_gate_close", {
-                        pos = gate_data.center, max_hear_distance = 30, gain = 0.6
-                    })
-                elseif is_linked and was_linked then
-                    -- Reconcile: ensure horizon exists even if nodes were lost.
-                    -- BUT skip if this gate is currently dialing — the dialing
-                    -- sequence handles horizon placement when it completes.
-                    if not gate_state[address] == "dialing" then
+                    elseif state == "connected" then
                         place_event_horizon(gate_data.pos)
                     end
-                elseif not is_linked and not was_linked then
-                    -- Both off — clean up any stray visuals
-                    remove_event_horizon(gate_data.pos)
-                    reset_keystones(gate_data.pos)
+                else
+                    if state == "connected" or state == "receiving" then
+                        gate_state[address] = "idle"
+                        gate_link_tiers[address] = nil
+                        remove_event_horizon(gate_data.pos)
+                        reset_keystones(gate_data.pos)
+                        core.sound_play("nexus_gate_close", {
+                            pos = gate_data.center, max_hear_distance = 30, gain = 0.6
+                        })
+                    elseif state == "idle" then
+                        remove_event_horizon(gate_data.pos)
+                    end
                 end
             end)
         end
     end
 end)
-
 -- Cleanup cooldown on leave
 core.register_on_leaveplayer(function(player)
     arrival_cooldown[player:get_player_name()] = nil
