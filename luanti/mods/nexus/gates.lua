@@ -1796,6 +1796,30 @@ core.register_globalstep(function(dtime)
                     if state == "idle" then
                         gate_state[address] = "receiving"
                         place_event_horizon(gate_data.pos)
+                        -- Light keystones with the remote gate's glyph sequence
+                        if link.remote_address then
+                            local remote_route = address_to_route(link.remote_address)
+                            local my_galaxy = nexus._config.galaxy_name or ""
+                            local my_world = nexus._config.world_name or ""
+                            local remote_tier = nexus.power.tier_for(
+                                my_galaxy, my_world,
+                                (remote_route and remote_route.galaxy) or my_galaxy,
+                                (remote_route and remote_route.world) or my_world)
+                            local symbols = compute_dial_sequence(link.remote_address, remote_tier)
+                            -- Light all keystones at once (receiving gate doesn't sequence)
+                            for i, sym_idx in ipairs(symbols) do
+                                local ks_idx = ((i - 1) % 7) + 1
+                                local off = KEYSTONE_OFFSETS[ks_idx]
+                                if off then
+                                    local kp = {x = gate_data.pos.x + off[1], y = gate_data.pos.y + off[2], z = gate_data.pos.z + off[3]}
+                                    local color = KEYSTONE_COLORS[sym_idx] or "white"
+                                    local node = core.get_node(kp)
+                                    if node.name == KEYSTONE_OFF or is_keystone(node.name) then
+                                        core.swap_node(kp, {name = keystone_lit_name(color)})
+                                    end
+                                end
+                            end
+                        end
                         core.sound_play("nexus_gate_open", {
                             pos = gate_data.center, max_hear_distance = 30, gain = 0.6
                         })
