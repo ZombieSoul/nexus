@@ -506,6 +506,7 @@ end
 
 -- Forward declarations for dialing flow (defined after keystone helpers)
 local start_dialing, cancel_dialing
+local compute_dial_sequence, play_dialing_sequence, reset_keystones
 
 -- =============================================================================
 -- Unified Dialing Flow
@@ -541,8 +542,6 @@ start_dialing = function(pos, player, gate_address, dest_address)
     local route = address_to_route(dest_address)
 
     -- Immediately notify the proxy to prepare the destination world.
-    -- If the world is offline, the proxy starts booting it NOW so it's
-    -- ready by the time the dialing sequence finishes.
     if route and route.world then
         nexus._http({
             url = PROXY .. "/nexus/world/" .. route.world .. "/start",
@@ -557,6 +556,7 @@ start_dialing = function(pos, player, gate_address, dest_address)
             end
         end)
     end
+
     local tier, tier_label = nexus.power.tier_for(
         GALAXY, WORLD,
         (route and route.galaxy) or GALAXY,
@@ -661,7 +661,7 @@ local function hash_to_symbol(s)
 end
 
 -- Compute the symbol sequence (colors) for a destination address
-local function compute_dial_sequence(dest_address, tier)
+compute_dial_sequence = function(dest_address, tier)
     local route = address_to_route(dest_address)
     if not route then return {} end
     local symbols = {}
@@ -688,7 +688,7 @@ local function compute_dial_sequence(dest_address, tier)
 end
 
 -- Play the dialing sequence: light each keystone one at a time
-local function play_dialing_sequence(base_pos, symbols, tier, on_complete)
+play_dialing_sequence = function(base_pos, symbols, tier, on_complete)
     local num_symbols = #symbols
     local per_symbol_time
     if tier == nexus.power.TIER.CROSS_GALAXY then
@@ -757,7 +757,7 @@ local function play_dialing_sequence(base_pos, symbols, tier, on_complete)
 end
 
 -- Reset all keystones to unlit (called when link closes)
-local function reset_keystones(base_pos)
+reset_keystones = function(base_pos)
     for _, off in ipairs(KEYSTONE_OFFSETS) do
         local kp = {x = base_pos.x + off[1], y = base_pos.y + off[2], z = base_pos.z + off[3]}
         if is_keystone(core.get_node(kp).name) then
