@@ -550,8 +550,10 @@ start_dialing = function(pos, player, gate_address, dest_address)
         return
     end
     if state == "receiving" then
-        core.chat_send_player(pname, "[nexus] This gate is receiving an incoming wormhole — close it first")
-        core.log("action", "[nexus] start_dialing aborted: receiving")
+        -- Incoming wormhole is active. Player can walk back through it.
+        -- But if they want to dial somewhere else, they must close it first.
+        core.chat_send_player(pname, "[nexus] This gate has an active wormhole — walk through to travel, or close it first to dial elsewhere")
+        core.log("action", "[nexus] start_dialing aborted: receiving (active wormhole)")
         return
     end
 
@@ -797,8 +799,19 @@ local function show_gate_formspec(pos, player)
     local linked = gate_state[address] == "connected"
 
     local title = is_ancient and "Ancient Stargate" or "Stargate"
-    local status_text = linked and "● LINKED" or "○ IDLE"
-    local status_color = linked and "#2BA830" or "#7A7A7A"
+    local state = gate_state[address] or "idle"
+    local status_text = "○ IDLE"
+    local status_color = "#7A7A7A"
+    if state == "connected" then
+        status_text = "● LINKED (origin)"
+        status_color = "#2BA830"
+    elseif state == "receiving" then
+        status_text = "● LINKED (incoming)"
+        status_color = "#2BA830"
+    elseif state == "dialing" then
+        status_text = "● DIALING..."
+        status_color = "#FFAA00"
+    end
 
     -- Use Mineclonia's formspec helpers if available, else fallback
     local LC = "#313131"  -- Mineclonia label color
@@ -1330,7 +1343,7 @@ core.register_globalstep(function(dtime)
             trigger_pos.y = trigger_pos.y + 1  -- feet level at the portal opening
             -- Block travel if this gate is currently dialing or not linked
             if gate_state[address] == "dialing" then return end
-            if gate_state[address] ~= "connected" then return end
+            if gate_state[address] ~= "connected" and gate_state[address] ~= "receiving" then return end
             local objects = core.get_objects_inside_radius(trigger_pos, 1.5)
             for _, obj in ipairs(objects) do
                 if obj:is_player() then
