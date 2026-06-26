@@ -128,6 +128,21 @@ func handleWorldStart(w http.ResponseWriter, r *http.Request, worldName string) 
 		return
 	}
 
+	// Check if already running
+	serverMgr.mu.RLock()
+	ms, exists := serverMgr.servers[worldName]
+	serverMgr.mu.RUnlock()
+
+	if exists && (ms.State == "online" || ms.State == "starting") {
+		writeJSON(w, 200, map[string]interface{}{
+			"ok":    true,
+			"world": worldName,
+			"port":  ms.Port,
+			"state": ms.State,
+		})
+		return
+	}
+
 	port, err := serverMgr.StartWorld(worldName)
 	if err != nil {
 		writeError(w, 500, "START_FAILED", err.Error())

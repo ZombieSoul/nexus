@@ -537,6 +537,24 @@ local function start_dialing(pos, player, gate_address, dest_address)
 
     -- Power check BEFORE dialing
     local route = address_to_route(dest_address)
+
+    -- Immediately notify the proxy to prepare the destination world.
+    -- If the world is offline, the proxy starts booting it NOW so it's
+    -- ready by the time the dialing sequence finishes.
+    if route and route.world then
+        nexus._http({
+            url = PROXY .. "/nexus/world/" .. route.world .. "/start",
+            method = "POST",
+            timeout = TIMEOUT,
+        }, function(result)
+            if result.code == 200 then
+                local resp = core.parse_json(result.data)
+                if resp and resp.state == "starting" then
+                    core.chat_send_player(pname, "[nexus] Destination world booting...")
+                end
+            end
+        end)
+    end
     local tier, tier_label = nexus.power.tier_for(
         GALAXY, WORLD,
         (route and route.galaxy) or GALAXY,
