@@ -3,6 +3,13 @@ cd "$(dirname "$0")/.."
 DIR="$(pwd)"
 echo "[start_proxy] Launching mt-multiserver-proxy on :40000"
 
+# Clear media cache — prevents 'media pool unknown to client' errors
+# after backend server crashes/restarts. The cache rebuilds itself on
+# first client connect, so clearing is safe (just a slightly longer
+# first connection while media transfers).
+rm -rf "$DIR/proxy/cache"/*
+echo "[start_proxy] Media cache cleared"
+
 # Load the shared nexus API secret (trusted by all galaxy servers)
 SECRET_FILE="$DIR/config/nexus_secret"
 if [ ! -f "$SECRET_FILE" ]; then
