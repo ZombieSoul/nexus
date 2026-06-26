@@ -506,13 +506,112 @@ end
 
 -- The gate formspec
 -- =============================================================================
--- Dialing Sequence
+-- Unified Dialing Flow
 -- =============================================================================
--- When a dial succeeds, keystones light up one at a time, each showing the
--- color of the symbol being dialed. The color sequence IS the address.
--- Per-tier timing controls drama: same-world is fast, cross-galaxy is ceremonial.
+-- The dialing sequence is purely visual/atmospheric. The gate plays the
+-- sequence regardless of whether the destination is valid. Only at the END
+-- does the backend check (establish_link) succeed or fail.
+--
+-- Flow:
+--   1. Power check (fail = abort before dialing starts)
+--   2. Start visual sequence (keystones light up one by one)
+--   3. Player can cancel at any point (stops sequence, resets)
+--   4. At sequence end: establish_link → open wormhole (or fail)
+--   5. Pad trigger blocked until link is established
 
--- Keystone node names and helpers (MUST be defined before play_dialing_sequence)
+--- Start the full dialing flow for a destination address.
+--- Power is checked first. If sufficient, the visual sequence plays.
+--- At the end, the link is established (or fails if address is invalid).
+local function start_dialing(pos, player, gate_address, dest_address)
+    local pname = player:get_player_name()
+
+    -- Don't allow if already dialing or linked
+    if dialing_in_progress[gate_address] then
+        core.chat_send_player(pname, "[nexus] Gate is already dialing")
+        return
+    end
+    if linked_gates[gate_address] then
+        core.chat_send_player(pname, "[nexus] Gate is already linked — close the wormhole first")
+        return
+    end
+
+    -- Power check BEFORE dialing
+    local route = address_to_route(dest_address)
+    local tier, tier_label = nexus.power.tier_for(
+        GALAXY, WORLD,
+        (route and route.galaxy) or GALAXY,
+        (route and route.world) or WORLD)
+    local can_afford, perr = nexus.power.check(gate_address, tier)
+    if not can_afford then
+        core.chat_send_player(pname, "[nexus] " .. perr)
+        core.sound_play("nexus_gate_abort", {to_player = pname})
+        return
+    end
+
+    -- Start the visual dialing sequence
+    local symbols = compute_dial_sequence(dest_address, tier)
+    dialing_in_progress[gate_address] = true
+
+    core.chat_send_player(pname, "[nexus] Dialing " .. dest_address ..
+        " — " .. #symbols .. " symbols (" .. tier_label .. ")...")
+
+    play_dialing_sequence(pos, symbols, tier, function()
+        -- Sequence complete — now try to establish the link
+        if not dialing_in_progress[gate_address] then
+            -- Was cancelled during the sequence
+            return
+        end
+
+        core.chat_send_player(pname, "[nexus] Establishing wormhole...")
+
+        nexus.gate.establish_link(gate_address, dest_address, pname, function(ok, info)
+            if not dialing_in_progress[gate_address] then
+                -- Was cancelled while waiting for link response
+                if ok then
+                    nexus.gate.close_link(gate_address)
+                end
+                return
+            end
+
+            dialing_in_progress[gate_address] = nil
+
+            if ok then
+                -- Success! Open the wormhole
+                linked_gates[gate_address] = true
+                gate_link_tiers[gate_address] = tier
+                nexus.power.consume(gate_address, tier)
+                place_event_horizon(pos)
+                core.chat_send_player(pname, "[nexus] Wormhole established!")
+                core.sound_play("nexus_gate_open", {
+                    pos = pos, max_hear_distance = 30, gain = 0.8
+                })
+            else
+                -- Failed — invalid address, gate doesn't exist, etc.
+                reset_keystones(pos)
+                core.chat_send_player(pname, "[nexus] Dialing failed: " ..
+                    tostring(info))
+                core.sound_play("nexus_gate_abort", {to_player = pname})
+            end
+        end)
+    end)
+end
+
+--- Cancel an in-progress dialing sequence.
+local function cancel_dialing(pos, player)
+    local meta = core.get_meta(pos)
+    local address = meta:get_string("address")
+
+    if dialing_in_progress[address] then
+        dialing_in_progress[address] = nil
+        reset_keystones(pos)
+        core.chat_send_player(player:get_player_name(), "[nexus] Dialing cancelled.")
+        core.sound_play("nexus_gate_abort", {
+            pos = pos, max_hear_distance = 20, gain = 0.5
+        })
+        return true
+    end
+    return false
+end
 local KEYSTONE_COLORS = {
     "red", "orange", "yellow", "green", "cyan", "blue",
     "violet", "magenta", "white", "pink", "lime", "amber",
@@ -1035,6 +1134,7 @@ core.register_on_player_receive_fields(function(player, formname, fields)
     -- Handle glyph dial pad clicks — build up the sequence
     local glyph_sequence = pmeta:get_string("nexus_dial_seq") or ""
     if fields.clear_dial then
+        cancel_dialing(pos, player)
         glyph_sequence = ""
         pmeta:set_string("nexus_dial_seq", "")
         pmeta:set_string("nexus_dial_indices", "")
@@ -1093,21 +1193,15 @@ core.register_on_player_receive_fields(function(player, formname, fields)
 
         -- If no crystal address was clicked, check for glyph sequence
         if not dest and glyph_sequence ~= "" then
-            -- Convert glyph sequence to indices
             local indices = {}
             for idx_str in glyph_sequence:gmatch("(%d+)") do
                 indices[#indices+1] = tonumber(idx_str)
             end
 
-            -- Try to find a matching registered gate
-            -- Query the proxy for all gates and match glyph sequences
-            -- For now: convert glyphs to a route guess and check
-            -- This is a simplified approach — the proxy will validate
             local symbols = nexus.glyphs.get_colored_symbols(indices)
             core.chat_send_player(pname, "[nexus] Dialing: " .. symbols)
-            core.sound_play("nexus_gate_dial", {to_player = pname})
 
-            -- Query the proxy for a gate matching this glyph sequence
+            -- Query the proxy for a matching gate
             local payload = core.write_json({glyphs = indices})
             nexus._http({
                 url = PROXY .. "/nexus/glyphs/lookup",
@@ -1119,39 +1213,7 @@ core.register_on_player_receive_fields(function(player, formname, fields)
                 if result.code == 200 then
                     local resp = core.parse_json(result.data)
                     if resp and resp.ok and resp.address then
-                        core.chat_send_player(pname, "[nexus] Address matched: " ..
-                            (resp.label or resp.address))
-                        -- Dial it
-                        local route = address_to_route(resp.address)
-                        local tier, tier_label = nexus.power.tier_for(
-                            GALAXY, WORLD,
-                            (route and route.galaxy) or GALAXY,
-                            (route and route.world) or WORLD)
-                        local can_afford, perr = nexus.power.check(address, tier)
-                        if not can_afford then
-                            core.chat_send_player(pname, "[nexus] " .. perr)
-                            return
-                        end
-                        nexus.gate.establish_link(address, resp.address, pname, function(ok, info)
-                            if ok then
-                                local dial_symbols = compute_dial_sequence(resp.address, tier)
-                                dialing_in_progress[address] = true
-                                play_dialing_sequence(pos, dial_symbols, tier, function()
-                                    dialing_in_progress[address] = nil
-                                    linked_gates[address] = true
-                                    place_event_horizon(pos)
-                                    gate_link_tiers[address] = tier
-                                    nexus.power.consume(address, tier)
-                                    core.chat_send_player(pname, "[nexus] Wormhole established!")
-                                    core.sound_play("nexus_gate_open", {
-                                        pos = pos, max_hear_distance = 30, gain = 0.8
-                                    })
-                                end)
-                            else
-                                core.chat_send_player(pname, "[nexus] Dialing failed: " ..
-                                    tostring(info))
-                            end
-                        end)
+                        start_dialing(pos, player, address, resp.address)
                     end
                 else
                     local resp = core.parse_json(result.data)
@@ -1165,7 +1227,7 @@ core.register_on_player_receive_fields(function(player, formname, fields)
             return true
         end
 
-        -- Text-based fallback (for crystals that store text addresses)
+        -- Text-based fallback (crystals store text addresses)
         if not dest then
             local typed = (fields.dest or ""):trim()
             if typed ~= "" then
@@ -1178,78 +1240,18 @@ core.register_on_player_receive_fields(function(player, formname, fields)
             return true
         end
 
-        -- Power check BEFORE dialing — don't open a wormhole you can't use
-        local route = address_to_route(dest)
-        local tier, tier_label = nexus.power.tier_for(
-            GALAXY, WORLD,
-            (route and route.galaxy) or GALAXY,
-            (route and route.world) or WORLD)
-        local can_afford, perr = nexus.power.check(address, tier)
-        if not can_afford then
-            core.chat_send_player(pname, "[nexus] " .. perr)
-            core.sound_play("nexus_gate_abort", {to_player = pname})
-            return true
-        end
-
-        core.chat_send_player(pname, "[nexus] Dialing " .. dest .. "...")
-
-        nexus.gate.establish_link(address, dest, pname, function(ok, info)
-            if ok then
-                -- Determine tier and play dialing sequence
-                local route = address_to_route(dest)
-                local tier, tier_label = nexus.power.tier_for(
-                    GALAXY, WORLD,
-                    (route and route.galaxy) or GALAXY,
-                    (route and route.world) or WORLD)
-                local symbols = compute_dial_sequence(dest, tier)
-
-                -- Consume dial cost power NOW (not on walk-through)
-                nexus.power.consume(address, tier)
-                -- Track the tier for upkeep
-                gate_link_tiers[address] = tier
-
-                core.chat_send_player(pname, "[nexus] Connection established — dialing " ..
-                    #symbols .. " symbols (" .. tier_label .. ")...")
-
-                -- Mark as dialing so the poller doesn't place the horizon early
-                dialing_in_progress[address] = true
-
-                play_dialing_sequence(pos, symbols, tier, function()
-                    -- Sequence complete — open the portal
-                    dialing_in_progress[address] = nil
-                    linked_gates[address] = true
-                    place_event_horizon(pos)
-                    core.chat_send_player(pname, "[nexus] Wormhole established!")
-                    core.sound_play("nexus_gate_open", {
-                        pos = pos, max_hear_distance = 30, gain = 0.8
-                    })
-                    -- Particle burst on portal open
-                    local center = get_center(pos)
-                    core.add_particlespawner({
-                        amount = 40, time = 0.5,
-                        minpos = {x=center.x-1, y=center.y-1, z=center.z-1},
-                        maxpos = {x=center.x+1, y=center.y+1, z=center.z+1},
-                        minvel = {x=-3, y=-3, z=-3},
-                        maxvel = {x=3, y=3, z=3},
-                        minexptime = 0.5, maxexptime = 1.5,
-                        minsize = 2, maxsize = 5,
-                        texture = "nexus_event_horizon.png",
-                        glow = 14,
-                    })
-                    -- Don't reopen the formspec — the player is watching the
-                    -- dialing animation, not interacting with the GUI
-                end)
-            else
-                core.chat_send_player(pname, "[nexus] Dialing failed: " ..
-                    tostring(info))
-                core.sound_play("nexus_gate_abort", {to_player = pname})
-            end
-        end)
+        -- Start the unified dialing flow
+        start_dialing(pos, player, address, dest)
+        return true
 
     elseif fields.close then
+        -- If dialing, cancel it. Otherwise close the link.
+        if cancel_dialing(pos, player) then
+            return true
+        end
         nexus.gate.close_link(address, function(ok)
             linked_gates[address] = nil
-    gate_link_tiers[address] = nil
+            gate_link_tiers[address] = nil
             remove_event_horizon(pos)
             reset_keystones(pos)
             if ok then
@@ -1260,6 +1262,7 @@ core.register_on_player_receive_fields(function(player, formname, fields)
             end
             show_gate_formspec(pos, player)
         end)
+        return true
     end
 
     return true  -- handled
@@ -1283,6 +1286,9 @@ core.register_globalstep(function(dtime)
             -- which is 1 block below center and barely within the old 1.5 radius.
             local trigger_pos = vector.new(gate_data.pos)
             trigger_pos.y = trigger_pos.y + 1  -- feet level at the portal opening
+            -- Block travel if this gate is currently dialing or not linked
+            if dialing_in_progress[address] then return end
+            if not linked_gates[address] then return end
             local objects = core.get_objects_inside_radius(trigger_pos, 1.5)
             for _, obj in ipairs(objects) do
                 if obj:is_player() then
