@@ -90,18 +90,25 @@ nexus.gate = {}
 -- Gates that exist on THIS server: address → {pos = vector, node_pos = vector}
 local local_gates = {}
 
--- Gates with active links on this server: address → true
-local linked_gates = {}
+-- =============================================================================
+-- Gate State Machine
+-- =============================================================================
+-- One variable per gate, one source of truth:
+--   "idle"       — no link, no dialing, no visuals
+--   "dialing"    — origin gate playing dialing sequence, keystones lighting up
+--   "receiving"  — destination gate of an active link, horizon visible
+--   "connected"  — origin gate with active wormhole, keystones lit, horizon visible
+--
+-- Transitions:
+--   idle → dialing → connected (success)
+--   idle → dialing → idle (failure/cancel)
+--   idle → receiving → idle (remote closed link)
+--   connected → idle (closed/power depleted)
 
--- Gates currently running their dialing sequence (prevents the poller
--- from placing the event horizon before the sequence completes)
-local dialing_in_progress = {}
+local gate_state = {}
+local gate_link_tiers = {}  -- tier of active link (for upkeep)
+local arrival_cooldown = {} -- anti-bounce-back (pname → expiry time)
 
--- Track the tier of each active link (for upkeep cost calculation)
-local gate_link_tiers = {}
-
--- Arrival cooldown to prevent immediate bounce-back (pname → expiry time)
-local arrival_cooldown = {}
 
 -- Generate a human-readable address from position.
 local function make_address(pos)
@@ -494,7 +501,7 @@ local function unregister_gate_at(pos)
     remove_event_horizon(pos)
 
     local_gates[address] = nil
-    linked_gates[address] = nil
+    gate_state[address] = "idle"
     gate_link_tiers[address] = nil
 
     -- Remove from mod_storage
@@ -529,11 +536,11 @@ start_dialing = function(pos, player, gate_address, dest_address)
     local pname = player:get_player_name()
 
     -- Don't allow if already dialing or linked
-    if dialing_in_progress[gate_address] then
+    if gate_state[gate_address] == "dialing" then
         core.chat_send_player(pname, "[nexus] Gate is already dialing")
         return
     end
-    if linked_gates[gate_address] then
+    if gate_state[gate_address] == "connected" then
         core.chat_send_player(pname, "[nexus] Gate is already linked — close the wormhole first")
         return
     end
@@ -570,14 +577,14 @@ start_dialing = function(pos, player, gate_address, dest_address)
 
     -- Start the visual dialing sequence
     local symbols = compute_dial_sequence(dest_address, tier)
-    dialing_in_progress[gate_address] = true
+    gate_state[gate_address] = "dialing"
 
     core.chat_send_player(pname, "[nexus] Dialing " .. dest_address ..
         " — " .. #symbols .. " symbols (" .. tier_label .. ")...")
 
     play_dialing_sequence(pos, symbols, tier, function()
         -- Sequence complete — now try to establish the link
-        if not dialing_in_progress[gate_address] then
+        if gate_state[gate_address] ~= "dialing" then
             -- Was cancelled during the sequence
             return
         end
@@ -585,7 +592,7 @@ start_dialing = function(pos, player, gate_address, dest_address)
         core.chat_send_player(pname, "[nexus] Establishing wormhole...")
 
         nexus.gate.establish_link(gate_address, dest_address, pname, function(ok, info)
-            if not dialing_in_progress[gate_address] then
+            if gate_state[gate_address] ~= "dialing" then
                 -- Was cancelled while waiting for link response
                 if ok then
                     nexus.gate.close_link(gate_address)
@@ -593,11 +600,11 @@ start_dialing = function(pos, player, gate_address, dest_address)
                 return
             end
 
-            dialing_in_progress[gate_address] = nil
+            if gate_state[gate_address] == "dialing" then gate_state[gate_address] = "idle" end
 
             if ok then
                 -- Success! Open the wormhole
-                linked_gates[gate_address] = true
+                gate_state[gate_address] = "connected"
                 gate_link_tiers[gate_address] = tier
                 nexus.power.consume(gate_address, tier)
                 place_event_horizon(pos)
@@ -621,8 +628,8 @@ cancel_dialing = function(pos, player)
     local meta = core.get_meta(pos)
     local address = meta:get_string("address")
 
-    if dialing_in_progress[address] then
-        dialing_in_progress[address] = nil
+    if gate_state[address] == "dialing" then
+        if gate_state[address] == "dialing" then gate_state[address] = "idle" end
         reset_keystones(pos)
         core.chat_send_player(player:get_player_name(), "[nexus] Dialing cancelled.")
         core.sound_play("nexus_gate_abort", {
@@ -770,7 +777,7 @@ local function show_gate_formspec(pos, player)
     local meta = core.get_meta(pos)
     local address = meta:get_string("address")
     local is_ancient = meta:get_string("ancient") == "true"
-    local linked = linked_gates[address] ~= nil
+    local linked = gate_state[address] == "connected"
 
     local title = is_ancient and "Ancient Stargate" or "Stargate"
     local status_text = linked and "● LINKED" or "○ IDLE"
@@ -1270,7 +1277,7 @@ core.register_on_player_receive_fields(function(player, formname, fields)
             return true
         end
         nexus.gate.close_link(address, function(ok)
-            linked_gates[address] = nil
+            gate_state[address] = "idle"
             gate_link_tiers[address] = nil
             remove_event_horizon(pos)
             reset_keystones(pos)
@@ -1300,15 +1307,15 @@ core.register_globalstep(function(dtime)
     pad_timer = 0
 
     for address, gate_data in pairs(local_gates) do
-        if linked_gates[address] then
+        if gate_state[address] == "connected" then
             -- Check at feet level (y+1) where the player walks through the opening.
             -- The center at y+2 is too high — standing on the base block puts feet at y+1,
             -- which is 1 block below center and barely within the old 1.5 radius.
             local trigger_pos = vector.new(gate_data.pos)
             trigger_pos.y = trigger_pos.y + 1  -- feet level at the portal opening
             -- Block travel if this gate is currently dialing or not linked
-            if dialing_in_progress[address] then return end
-            if not linked_gates[address] then return end
+            if gate_state[address] == "dialing" then return end
+            if gate_state[address] ~= "connected" then return end
             local objects = core.get_objects_inside_radius(trigger_pos, 1.5)
             for _, obj in ipairs(objects) do
                 if obj:is_player() then
@@ -1435,7 +1442,7 @@ core.register_globalstep(function(dtime)
     item_sensor_timer = 0
 
     for address, gate_data in pairs(local_gates) do
-        if linked_gates[address] then
+        if gate_state[address] == "connected" then
             local pos = gate_data.center or gate_data.pos
             local objects = core.get_objects_inside_radius(pos, 1.5)
             for _, obj in ipairs(objects) do
@@ -1576,7 +1583,7 @@ core.register_chatcommand("dial", {
 
         nexus.gate.establish_link(nearest_addr, dest, name, function(ok, info)
             if ok then
-                linked_gates[nearest_addr] = true
+                gate_state[nearest_addr] = "connected"
                 -- Consume dial cost and track tier for upkeep
                 nexus.power.consume(nearest_addr, tier)
                 gate_link_tiers[nearest_addr] = tier
@@ -1688,7 +1695,7 @@ core.register_chatcommand("closegate", {
         end
 
         nexus.gate.close_link(nearest_addr, function()
-            linked_gates[nearest_addr] = nil
+            gate_state[nearest_addr] = "idle"
             gate_link_tiers[nearest_addr] = nil
             core.chat_send_player(name, "[nexus] Wormhole closed.")
             local gate_data = local_gates[nearest_addr]
@@ -1716,7 +1723,7 @@ core.register_chatcommand("gates", {
         end
         local lines = {"Stargates on " .. GALAXY .. ":"}
         for addr, data in pairs(local_gates) do
-            local linked = linked_gates[addr] and " [LINKED]" or ""
+            local linked = gate_state[addr] == "connected" and " [LINKED]" or ""
             local p = data.pos
             table.insert(lines, "  " .. addr .. " at (" ..
                 p.x .. "," .. p.y .. "," .. p.z .. ")" .. linked)
@@ -1751,21 +1758,21 @@ core.register_globalstep(function(dtime)
                 link_query_pending[address] = false
 
                 local is_linked = link and link.linked
-                local was_linked = linked_gates[address] ~= nil
+                local was_linked = gate_state[address] == "connected"
 
                 if is_linked and not was_linked then
                     -- Link just appeared
-                    if dialing_in_progress[address] then
-                        linked_gates[address] = true
+                    if gate_state[address] == "dialing" then
+                        gate_state[address] = "connected"
                     else
-                        linked_gates[address] = true
+                        gate_state[address] = "connected"
                         place_event_horizon(gate_data.pos)
                         core.sound_play("nexus_gate_open", {
                             pos = gate_data.center, max_hear_distance = 30, gain = 0.6
                         })
                     end
                 elseif not is_linked and was_linked then
-                    linked_gates[address] = nil
+                    gate_state[address] = "idle"
                     gate_link_tiers[address] = nil
                     remove_event_horizon(gate_data.pos)
                     reset_keystones(gate_data.pos)
@@ -1776,7 +1783,7 @@ core.register_globalstep(function(dtime)
                     -- Reconcile: ensure horizon exists even if nodes were lost.
                     -- BUT skip if this gate is currently dialing — the dialing
                     -- sequence handles horizon placement when it completes.
-                    if not dialing_in_progress[address] then
+                    if not gate_state[address] == "dialing" then
                         place_event_horizon(gate_data.pos)
                     end
                 elseif not is_linked and not was_linked then
@@ -1806,7 +1813,7 @@ end
 --- Is this gate's wormhole currently open AND did this gate initiate the dial?
 --- Only the origin gate pays upkeep — the receiving gate doesn't.
 function nexus.gate.is_dial_origin(address)
-    return linked_gates[address] ~= nil and gate_link_tiers[address] ~= nil
+    return gate_state[address] == "connected" and gate_link_tiers[address] ~= nil
 end
 
 --- Get the power tier of the active link for this gate (for upkeep cost)

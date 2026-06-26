@@ -5,6 +5,8 @@ import (
 	"log"
 	"net/http"
 	"strings"
+
+	proxy "github.com/HimbeerserverDE/mt-multiserver-proxy"
 )
 
 // =============================================================================
@@ -128,7 +130,18 @@ func handleWorldStart(w http.ResponseWriter, r *http.Request, worldName string) 
 		return
 	}
 
-	// Check if already running
+	// Check if this is a static world (always running, managed by startup script)
+	// These are in the proxy's config.json and don't need process management.
+	if _, exists := proxy.Conf().Servers[worldName]; exists {
+		writeJSON(w, 200, map[string]interface{}{
+			"ok":    true,
+			"world": worldName,
+			"state": "online",
+		})
+		return
+	}
+
+	// Check if already running as a managed server
 	serverMgr.mu.RLock()
 	ms, exists := serverMgr.servers[worldName]
 	serverMgr.mu.RUnlock()
