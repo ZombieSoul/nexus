@@ -902,7 +902,7 @@ local function show_gate_formspec(pos, player)
 
     -- ── Manual dial section ──
     parts[#parts+1] = "label[0.4,7.2;Manual Dial]"
-    parts[#parts+1] = string.format("field[0.4,7.9;7.5,0.9;dest;Destination Address;]",)
+    parts[#parts+1] = "field[0.4,7.9;7.5,0.9;dest;Destination Address;]"
     parts[#parts+1] = "button[0.4,8.9;3.5,0.8;dial;Dial]"
     parts[#parts+1] = "button[4.1,8.9;3.5,0.8;clear_dial;Clear]"
     parts[#parts+1] = "button[7.8,8.9;3.5,0.8;close;Close Link]"
