@@ -1,392 +1,100 @@
 -- nexus/gates.lua
--- Gate-to-gate travel system.
+-- Gate-to-gate travel system using native Luanti dimensions.
 --
--- Provides physical stargate blocks, gate registry interaction,
--- link establishment (dialing), walk-through travel triggers,
--- and arrival positioning at destination gates.
+-- Gates are physical structures (7 keystones + base block). Players dial
+-- addresses using glyph sequences or saved crystals. When a link is
+-- established, walking through the gate switches the player's dimension.
 --
--- This module is loaded at the END of init.lua, so it has access to
--- nexus.travel, nexus._http, nexus._config, and all transfer state.
+-- Gate links are LOCAL (in-memory) — no proxy, no HTTP, no state transfer.
+-- The engine's change_player_dimension handles everything.
 
-local http_fn = nexus._http
 local cfg = nexus._config
-local PROXY = cfg.proxy_url
-local TIMEOUT = cfg.http_timeout
 local GALAXY = cfg.galaxy_name
 local WORLD = cfg.world_name or GALAXY
 local ALLOW_SAME_WORLD = cfg.allow_same_world ~= false
 
--- Mod storage for gate persistence (survives server restart)
-local storage = core.get_mod_storage()
+-- Forward declarations
+local start_dialing, cancel_dialing
+local compute_dial_sequence, play_dialing_sequence, reset_keystones
 
--- Dial timing (per-symbol, per-tier). Controls how dramatic the dialing sequence is.
-local DIAL_TIME = {
-    same_world   = tonumber(core.settings:get("nexus.dial_time_same_world")) or 1.0,
-    same_galaxy  = tonumber(core.settings:get("nexus.dial_time_same_galaxy")) or 1.5,
-    cross_galaxy = tonumber(core.settings:get("nexus.dial_time_cross_galaxy")) or 2.0,
-}
+nexus.gates = {}
+nexus.gate = {}
+
+-- =============================================================================
+-- Gate Registry — local in-memory (no proxy)
+-- =============================================================================
+
+-- All registered gates: address → {pos, center, arrival, dimension, label}
+local local_gates = {}
+
+-- Gate links: address → {remote_address, remote_dimension, remote_pos, tier}
+local active_links = {}
+
+-- Gate state: address → "idle" | "dialing" | "connected" | "receiving"
+local gate_state = {}
+
+-- Gate power tiers (for upkeep)
+local gate_link_tiers = {}
+
+-- Track dialing sequences
+local dialing_timers = {}
+
+-- Expose for nexus_power
+function nexus.gate.get_local_gates()
+    return local_gates
+end
+
+function nexus.gate.is_dial_origin(address)
+    return gate_state[address] == "connected"
+end
+
+function nexus.gate.get_link_tier(address)
+    return gate_link_tiers[address] or nexus.power.TIER.SAME_WORLD
+end
+
+-- Expose gate registry for nexus.travel
+nexus.gates = local_gates
 
 -- =============================================================================
 -- Address Conversion Layer
 -- =============================================================================
--- The ONLY place address strings are parsed or formatted.
--- Internal routing always uses structured route tables:
---   { galaxy = "milkyway", world = "earth", gate_id = "g10_20" }
--- Changing the address format later means changing ONLY these two functions.
--- Current format: "galaxy:world:gate_id" (e.g. "milkyway:earth:g10_20")
 
---- Parse an address string into a structured route.
---- @param addr string  e.g. "milkyway:earth:g10_20"
---- @return table? route  {galaxy=, world=, gate_id=} or nil if invalid
 local function address_to_route(addr)
     if not addr then return nil end
-    -- Try 3-part format: galaxy:world:gate_id
-    local galaxy, world, gate_id = addr:match("^([^:]+):([^:]+):([^:]+)$")
-    if galaxy then
-        return { galaxy = galaxy, world = world, gate_id = gate_id }
-    end
-    -- Try legacy 2-part format: galaxy:gate_id (from before world decoupling)
-    local old_galaxy, old_gid = addr:match("^([^:]+):([^:]+)$")
-    if old_galaxy then
-        return { galaxy = old_galaxy, world = old_galaxy, gate_id = old_gid }
+    local dim, gate_id = addr:match("^([^:]+):([^:]+)$")
+    if dim then
+        return { dimension = dim, gate_id = gate_id }
     end
     return nil
 end
 
---- Format a structured route into an address string.
---- @param route table  {galaxy=, world=, gate_id=}
---- @return string address
 local function route_to_address(route)
-    return route.galaxy .. ":" .. route.world .. ":" .. route.gate_id
+    return route.dimension .. ":" .. route.gate_id
 end
 
---- Generate a unique gate_id from position (within this world).
 local function make_gate_id(pos)
     return "g" .. math.abs(pos.x) .. "_" .. math.abs(pos.z)
 end
 
---- Build the full route for a gate at the given position on this server.
 local function make_route(pos)
-    return {
-        galaxy = GALAXY,
-        world = WORLD,
-        gate_id = make_gate_id(pos),
-    }
+    -- The dimension is the CURRENT dimension the player is in
+    local dim = core.get_player_by_name("__dimension_lookup__") -- dummy
+    -- Actually we need to know the current dimension at gate placement time
+    -- Use a different approach: the gate stores its dimension
+    return nil -- handled by register_gate_at
 end
 
--- Authenticated HTTP with Content-Type
-local function gate_http(opts, callback)
-    opts.extra_headers = opts.extra_headers or {}
-    table.insert(opts.extra_headers, "Content-Type: application/json")
-    return http_fn(opts, callback)
-end
-
-nexus.gate = {}
-
--- =============================================================================
--- Local Gate Tracking
--- =============================================================================
-
--- Gates that exist on THIS server: address → {pos = vector, node_pos = vector}
-local local_gates = {}
-
--- =============================================================================
--- Gate State Machine
--- =============================================================================
--- One variable per gate, one source of truth:
---   "idle"       — no link, no dialing, no visuals
---   "dialing"    — origin gate playing dialing sequence, keystones lighting up
---   "receiving"  — destination gate of an active link, horizon visible
---   "connected"  — origin gate with active wormhole, keystones lit, horizon visible
---
--- Transitions:
---   idle → dialing → connected (success)
---   idle → dialing → idle (failure/cancel)
---   idle → receiving → idle (remote closed link)
---   connected → idle (closed/power depleted)
-
-local gate_state = {}
-local gate_link_tiers = {}  -- tier of active link (for upkeep)
-local arrival_cooldown = {} -- anti-bounce-back (pname → expiry time)
-
-
--- Generate a human-readable address from position.
-local function make_address(pos)
-    return route_to_address(make_route(pos))
+local function make_address(pos, dimension_name)
+    return dimension_name .. ":" .. make_gate_id(pos)
 end
 
 -- =============================================================================
--- Gate Registry API (HTTP wrappers)
+-- Gate Structure Geometry
 -- =============================================================================
-
---- Register a gate with the proxy.
-function nexus.gate.register(gate_def, callback)
-    local payload = core.write_json(gate_def)
-    gate_http({
-        url = PROXY .. "/nexus/gate",
-        method = "POST",
-        data = payload,
-        timeout = TIMEOUT,
-    }, function(result)
-        if result.code == 200 then
-            core.log("action", "[nexus] gate registered: " .. gate_def.address)
-        else
-            core.log("error", "[nexus] gate register failed for " ..
-                gate_def.address .. ": HTTP " .. result.code)
-        end
-        if callback then callback(result.code == 200) end
-    end)
-end
-
---- Unregister a gate (destroyed).
-function nexus.gate.unregister(address, callback)
-    gate_http({
-        url = PROXY .. "/nexus/gate/" .. address,
-        method = "DELETE",
-        timeout = TIMEOUT,
-    }, function(result)
-        if callback then callback(result.code == 200) end
-    end)
-end
-
---- Query a gate's info from the proxy.
-function nexus.gate.get_info(address, callback)
-    gate_http({
-        url = PROXY .. "/nexus/gate/" .. address,
-        method = "GET",
-        timeout = TIMEOUT,
-    }, function(result)
-        if result.code ~= 200 then
-            callback(nil)
-            return
-        end
-        local resp = core.parse_json(result.data)
-        callback(resp)
-    end)
-end
-
---- Establish a link (dial). Calls callback(true, link_info) or callback(false, error_msg).
-function nexus.gate.establish_link(from_addr, to_addr, opened_by, callback)
-    local payload = core.write_json({
-        from = from_addr,
-        to = to_addr,
-        opened_by = opened_by,
-        duration = 0,  -- 0 = manual close only (no auto-expire)
-    })
-    gate_http({
-        url = PROXY .. "/nexus/link",
-        method = "POST",
-        data = payload,
-        timeout = TIMEOUT,
-    }, function(result)
-        local resp = core.parse_json(result.data)
-        if result.code == 200 and resp and resp.ok then
-            callback(true, resp)
-        else
-            local msg = (resp and resp.message) or ("HTTP " .. result.code)
-            callback(false, msg)
-        end
-    end)
-end
-
---- Close a link.
-function nexus.gate.close_link(gate_address, callback)
-    gate_http({
-        url = PROXY .. "/nexus/link/" .. gate_address,
-        method = "DELETE",
-        timeout = TIMEOUT,
-    }, function(result)
-        if callback then callback(result.code == 200) end
-    end)
-end
-
---- Query the active link for a gate.
-function nexus.gate.get_link(gate_address, callback)
-    gate_http({
-        url = PROXY .. "/nexus/link/" .. gate_address,
-        method = "GET",
-        timeout = TIMEOUT,
-    }, function(result)
-        if result.code ~= 200 then
-            callback(nil)
-            return
-        end
-        local resp = core.parse_json(result.data)
-        callback(resp)
-    end)
-end
-
--- =============================================================================
--- Gate Travel
--- =============================================================================
-
---- Travel a player through a linked gate to the destination.
-function nexus.gate.travel_player(player, gate_address)
-    local pname = player:get_player_name()
-
-    -- Don't trigger if already in transit
-    if nexus.is_in_transit(pname) then return end
-    -- Don't trigger during arrival cooldown (prevents bounce-back)
-    -- Use core.get_us_time() (real-time microseconds) — os.clock() is CPU
-    -- time and barely advances on an idle server, making cooldowns permanent.
-    local now = core.get_us_time() / 1000000
-    if arrival_cooldown[pname] and now < arrival_cooldown[pname] then
-        return
-    end
-
-    -- Set immediate cooldown to prevent re-trigger during the async
-    -- HTTP call (the real departing flag isn't set until nexus.travel runs)
-    arrival_cooldown[pname] = now + 5.0
-
-    nexus.gate.get_link(gate_address, function(link)
-        if not link or not link.linked then
-            return  -- no active link
-        end
-
-        core.log("action", "[nexus] " .. pname .. " entering gate " ..
-            gate_address .. " → " .. link.remote_address)
-
-        -- Resolve the remote route from the address
-        local remote = address_to_route(link.remote_address)
-        local remote_world = (remote and remote.world) or link.remote_world
-        local remote_galaxy = (remote and remote.galaxy) or link.remote_galaxy
-
-        -- Power check: determine the tier and verify the gate can afford it.
-        -- If nexus.power has no provider (or require_power=false), this
-        -- always passes — gates are free.
-        core.log("action", "[nexus] start_dialing: past state checks, checking power...")
-    local tier, tier_label = nexus.power.tier_for(
-            GALAXY, WORLD, remote_galaxy or GALAXY, remote_world or WORLD)
-        local can_afford, perr = nexus.power.check(gate_address, tier)
-        if not can_afford then
-            core.chat_send_player(pname, "[nexus] " .. perr)
-            core.log("action", "[nexus] " .. pname ..
-                " travel blocked: insufficient power (" .. tier_label .. ")")
-            return
-        end
-
-        if remote_world == WORLD then
-            -- SAME WORLD: instant local teleport (if allowed)
-            -- Player stays on this server, just moves to the dest gate.
-            if not ALLOW_SAME_WORLD then
-                core.chat_send_player(pname, "[nexus] Same-world gate travel is disabled.")
-                return
-            end
-
-            -- Consume power at dial time now, not walk-through
-            nexus.gate.get_info(link.remote_address, function(info)
-                if not info or not info.gate then
-                    core.chat_send_player(pname, "[nexus] Destination gate lost.")
-                    return
-                end
-                local g = info.gate
-                local pos = g.position or {}
-                local offset = g.arrival_offset or {x = 0, y = 1, z = 0}
-                local arrival_pos = {
-                    x = (pos.x or 0) + (offset.x or 0),
-                    y = (pos.y or 0) + (offset.y or 0),
-                    z = (pos.z or 0) + (offset.z or 0),
-                }
-                player:set_pos(arrival_pos)
-                if g.facing then
-                    player:set_look_horizontal(math.rad(g.facing))
-                end
-                player:set_velocity({x = 0, y = 0, z = 0})
-                arrival_cooldown[pname] = (core.get_us_time() / 1000000) + 3.0
-                core.log("action", "[nexus] " .. pname ..
-                    " teleported locally to " .. link.remote_address)
-            end)
-        else
-            -- CROSS WORLD: proxy hop + state sync (same galaxy = interstellar,
-            -- different galaxy = intergalactic — mechanism is the same,
-            -- power cost differentiation comes with the energy system)
-
-            -- Consume power at dial time now, not walk-through
-            nexus.travel(player, remote_world or link.remote_galaxy, {
-                arrival_gate = link.remote_address,
-                departure_gate = gate_address,
-            })
-        end
-    end)
-end
-
--- =============================================================================
--- Arrival Positioning
--- =============================================================================
-
--- Override the placeholder from init.lua — position the player at the
--- destination gate's arrival point with correct facing.
-nexus._handle_gate_arrival = function(player, arrival_gate)
-    local pname = player:get_player_name()
-
-    -- Set arrival cooldown so they don't immediately bounce back
-    arrival_cooldown[pname] = (core.get_us_time() / 1000000) + 3.0
-
-    nexus.gate.get_info(arrival_gate, function(info)
-        if not info or not info.gate then
-            core.chat_send_player(pname,
-                "[nexus] Destination gate '" .. arrival_gate ..
-                "' not found. Spawning at world origin.")
-            core.log("warning", "[nexus] arrival gate " .. arrival_gate ..
-                " not found — emergency spawn for " .. pname)
-            return
-        end
-
-        local g = info.gate
-        local pos = g.position or {}
-        local offset = g.arrival_offset or {x = 0, y = 1, z = 0}
-        local arrival_pos = {
-            x = (pos.x or 0) + (offset.x or 0),
-            y = (pos.y or 0) + (offset.y or 0),
-            z = (pos.z or 0) + (offset.z or 0),
-        }
-
-        -- Teleport player to the arrival point
-        player:set_pos(arrival_pos)
-
-        -- Set facing to match gate orientation
-        if g.facing then
-            player:set_look_horizontal(math.rad(g.facing))
-        end
-
-        -- Zero velocity to prevent fall damage
-        player:set_velocity({x = 0, y = 0, z = 0})
-
-        core.log("action", "[nexus] " .. pname .. " arrived at gate " ..
-            arrival_gate .. " (" .. math.floor(arrival_pos.x) .. "," ..
-            math.floor(arrival_pos.y) .. "," .. math.floor(arrival_pos.z) .. ")")
-    end)
-end
-
--- =============================================================================
--- Gate Block
--- =============================================================================
-
--- The gate base is the master block. When placed, it registers with the proxy.
--- When destroyed, it unregisters. Right-click shows the dial formspec.
 
 local GATE_NODE = "nexus:gate_base"
 local HORIZON_NODE = "nexus:event_horizon"
-local SPAN_NODE = "nexus:gate_span"
 
--- =============================================================================
--- Hexagonal Gate Geometry
--- =============================================================================
--- The gate is a HEXAGONAL ring of 6 keystones. The base block is the
--- controller at the bottom. Each keystone lights up with the color of the
--- symbol being dialed — the color sequence IS the address.
---
--- Layout (relative to base block at origin, facing north / -Z):
---
---          K1                y+5   top vertex
---       K6    K2             y+4   upper sides
---       [portal] [portal]    y+3   event horizon fills here
---       [portal]             y+2   event horizon
---       K5    K3             y+2   lower sides
---          K4                y+1   bottom vertex
---          BASE              y+0   controller
-
--- 7 Keystones (one per dial symbol position — cross-galaxy needs all 7)
 local KEYSTONE_OFFSETS = {
     {-2, 1, 0},   -- K1 lower-left
     {2,  1, 0},   -- K2 lower-right
@@ -397,87 +105,66 @@ local KEYSTONE_OFFSETS = {
     {0,  6, 0},   -- K7 top center
 }
 
--- Span blocks fill ALL non-keystone, non-portal positions to form a solid ring
 local SPAN_OFFSETS = {
-    {-1, 0, 0}, {1, 0, 0},              -- y+0: O C O
-    {-3, 2, 0}, {3, 2, 0},              -- y+2: O ... O
-    {-3, 4, 0}, {3, 4, 0},              -- y+4: O ... O
-    {-1, 6, 0}, {1, 6, 0},              -- y+6: O X O (top: span, K7 keystone, span)
+    {-1, 0, 0}, {1, 0, 0},
+    {-3, 2, 0}, {3, 2, 0},
+    {-3, 4, 0}, {3, 4, 0},
+    {-1, 6, 0}, {1, 6, 0},
 }
 
--- All frame blocks
-local ALL_FRAME_OFFSETS = {}
-for _, off in ipairs(KEYSTONE_OFFSETS) do ALL_FRAME_OFFSETS[#ALL_FRAME_OFFSETS+1] = off end
-for _, off in ipairs(SPAN_OFFSETS) do ALL_FRAME_OFFSETS[#ALL_FRAME_OFFSETS+1] = off end
-
--- Portal opening offsets (event horizon fills the interior)
 local PORTAL_OFFSETS = {
-    {-1, 1, 0}, {0, 1, 0}, {1, 1, 0},                          -- y+1: 3 air
-    {-2, 2, 0}, {-1, 2, 0}, {0, 2, 0}, {1, 2, 0}, {2, 2, 0},  -- y+2: 5 air
-    {-2, 3, 0}, {-1, 3, 0}, {0, 3, 0}, {1, 3, 0}, {2, 3, 0},  -- y+3: 5 air
-    {-2, 4, 0}, {-1, 4, 0}, {0, 4, 0}, {1, 4, 0}, {2, 4, 0},  -- y+4: 5 air
-    {-1, 5, 0}, {0, 5, 0}, {1, 5, 0},                          -- y+5: 3 air
+    {-1, 1, 0}, {0, 1, 0}, {1, 1, 0},
+    {-2, 2, 0}, {-1, 2, 0}, {0, 2, 0}, {1, 2, 0}, {2, 2, 0},
+    {-2, 3, 0}, {-1, 3, 0}, {0, 3, 0}, {1, 3, 0}, {2, 3, 0},
+    {-2, 4, 0}, {-1, 4, 0}, {0, 4, 0}, {1, 4, 0}, {2, 4, 0},
+    {-1, 5, 0}, {0, 5, 0}, {1, 5, 0},
 }
 
--- The center of the ring (trigger zone) is 3.5 blocks above the base
 local function get_center(base_pos)
     return {x = base_pos.x, y = base_pos.y + 3, z = base_pos.z}
 end
 
--- Arrival point: 2 blocks in front of center, clear of trigger radius
 local function get_arrival_pos(base_pos)
     local c = get_center(base_pos)
     return {x = c.x, y = c.y, z = c.z - 2}
 end
 
--- Legacy alias
-local RING_OFFSETS = ALL_FRAME_OFFSETS
+-- =============================================================================
+-- Keystone Definitions
+-- =============================================================================
 
-local function register_gate_at(pos)
-    local address = make_address(pos)
-    local meta = core.get_meta(pos)
-    meta:set_string("address", address)
-    meta:set_string("infotext", "Stargate: " .. address)
+local KEYSTONE_COLORS = {
+    "red", "orange", "yellow", "green", "cyan", "blue",
+    "violet", "magenta", "white", "pink", "lime", "amber",
+}
+nexus._keystone_colors = KEYSTONE_COLORS
 
-    -- Ensure the crystal slot inventory exists (set up here so it works
-    -- for both newly-placed gates AND gates re-loaded via LBM on restart)
-    local inv = meta:get_inventory()
-    if inv:get_size("crystal") == 0 then
-        inv:set_size("crystal", 1)
-    end
+local KEYSTONE_OFF = "nexus:keystone_off"
 
-    -- Persist gate position in mod_storage so we can re-register ALL gates
-    -- on server startup — not just ones in loaded chunks.
-    storage:set_string("gate_" .. address,
-        pos.x .. "," .. pos.y .. "," .. pos.z)
-
-    local center = get_center(pos)
-    local arrival = get_arrival_pos(pos)
-
-    local_gates[address] = {
-        pos = vector.new(pos),
-        center = vector.new(center),
-        arrival = vector.new(arrival),
-    }
-
-    nexus.gate.register({
-        address = address,
-        label = WORLD .. " Gate",
-        galaxy = GALAXY,
-        world = WORLD,
-        position = {x = center.x, y = center.y, z = center.z},
-        arrival_offset = {x = 0, y = 0, z = -2},  -- 2 blocks in front of center
-        facing = 0,
-        powered = true,
-        obstructed = false,
-    })
+local function keystone_lit_name(color)
+    return "nexus:keystone_lit_" .. color
 end
+
+local function is_keystone(name)
+    if name == KEYSTONE_OFF then return true end
+    for _, color in ipairs(KEYSTONE_COLORS) do
+        if name == keystone_lit_name(color) then return true end
+    end
+    return false
+end
+
+local function is_ancient_keystone(name)
+    return name and name:match("^nexus_worldgen:")
+end
+
+-- =============================================================================
+-- Event Horizon
+-- =============================================================================
 
 local function remove_event_horizon(base_pos)
     for _, off in ipairs(PORTAL_OFFSETS) do
         local p = {x = base_pos.x + off[1], y = base_pos.y + off[2], z = base_pos.z + off[3]}
-        local node = core.get_node(p)
-        if node.name == HORIZON_NODE then
+        if core.get_node(p).name == HORIZON_NODE then
             core.remove_node(p)
         end
     end
@@ -486,11 +173,81 @@ end
 local function place_event_horizon(base_pos)
     for _, off in ipairs(PORTAL_OFFSETS) do
         local p = {x = base_pos.x + off[1], y = base_pos.y + off[2], z = base_pos.z + off[3]}
-        local node = core.get_node(p)
-        if node.name == "air" then
+        if core.get_node(p).name == "air" then
             core.set_node(p, {name = HORIZON_NODE})
         end
     end
+end
+
+core.register_node(HORIZON_NODE, {
+    description = "Event Horizon",
+    tiles = {{
+        name = "nexus_event_horizon_anim.png",
+        animation = {type = "vertical_frames", aspect_w = 16, aspect_h = 16, length = 3},
+    }},
+    drawtype = "glasslike",
+    paramtype = "light",
+    use_texture_alpha = "blend",
+    groups = {not_in_creative_inventory = 1, unbreakable = 1},
+    light_source = 14,
+    walkable = false,
+    pointable = false,
+    diggable = false,
+    drop = "",
+    post_effect_color = {a = 80, r = 20, g = 40, b = 120},
+})
+
+-- =============================================================================
+-- Gate Registration
+-- =============================================================================
+
+local storage = core.get_mod_storage()
+
+local function get_dimension_at_pos(pos)
+    -- Find which dimension this position is in by checking the player
+    -- or use a global that gates.lua sets during registration
+    -- Actually, we can store it in node metadata
+    return nil -- will be set in on_construct
+end
+
+local function register_gate_at(pos, dimension_name)
+    if not dimension_name then
+        -- Try to get from metadata (for re-registration)
+        dimension_name = core.get_meta(pos):get_string("dimension")
+        if dimension_name == "" then
+            -- Default to the mod's configured world
+            dimension_name = WORLD
+        end
+    end
+
+    local address = make_address(pos, dimension_name)
+    local meta = core.get_meta(pos)
+    meta:set_string("address", address)
+    meta:set_string("dimension", dimension_name)
+    meta:set_string("infotext", "Ancient Gate")
+
+    -- Crystal slot
+    local inv = meta:get_inventory()
+    if inv:get_size("crystal") == 0 then
+        inv:set_size("crystal", 1)
+    end
+
+    local center = get_center(pos)
+    local arrival = get_arrival_pos(pos)
+
+    local_gates[address] = {
+        pos = vector.new(pos),
+        center = vector.new(center),
+        arrival = vector.new(arrival),
+        dimension = dimension_name,
+    }
+
+    -- Persist in mod_storage
+    storage:set_string("gate_" .. address,
+        pos.x .. "," .. pos.y .. "," .. pos.z .. "," .. dimension_name)
+
+    core.log("action", "[nexus] gate registered: " .. address ..
+        " in dimension " .. dimension_name)
 end
 
 local function unregister_gate_at(pos)
@@ -498,89 +255,231 @@ local function unregister_gate_at(pos)
     local address = meta:get_string("address")
     if address == "" then return end
 
-    -- Remove event horizon
     remove_event_horizon(pos)
 
-    local_gates[address] = nil
-    gate_state[address] = "idle"
-    gate_link_tiers[address] = nil
+    -- Break any active link
+    if active_links[address] then
+        local remote = active_links[address].remote_address
+        active_links[address] = nil
+        active_links[remote] = nil
+        gate_state[address] = nil
+        gate_state[remote] = nil
+    end
 
-    -- Remove from mod_storage
+    local_gates[address] = nil
     storage:set_string("gate_" .. address, "")
 
-    nexus.gate.unregister(address)
     core.log("action", "[nexus] gate destroyed: " .. address)
 end
 
--- Forward declarations for dialing flow (defined after keystone helpers)
-local start_dialing, cancel_dialing
-local compute_dial_sequence, play_dialing_sequence, reset_keystones
+-- =============================================================================
+-- Gate Link Management (local — no HTTP)
+-- =============================================================================
+
+local function establish_link(from_addr, to_addr, opened_by)
+    -- Check destination gate exists
+    if not local_gates[to_addr] then
+        return false, "No gate at address '" .. to_addr .. "'"
+    end
+
+    -- Can't link to self
+    if from_addr == to_addr then
+        return false, "Gate cannot link to itself"
+    end
+
+    -- Check neither gate is already linked
+    if active_links[from_addr] then
+        return false, "Origin gate already linked"
+    end
+    if active_links[to_addr] then
+        return false, "Destination gate already linked"
+    end
+
+    -- Create bidirectional link
+    local from_gate = local_gates[from_addr]
+    local to_gate = local_gates[to_addr]
+
+    active_links[from_addr] = {
+        remote_address = to_addr,
+        remote_dimension = to_gate.dimension,
+        remote_pos = to_gate.pos,
+        remote_arrival = to_gate.arrival,
+    }
+    active_links[to_addr] = {
+        remote_address = from_addr,
+        remote_dimension = from_gate.dimension,
+        remote_pos = from_gate.pos,
+        remote_arrival = from_gate.arrival,
+    }
+
+    core.log("action", "[nexus] link established: " .. from_addr .. " <-> " .. to_addr ..
+        " (by " .. (opened_by or "?") .. ")")
+    return true
+end
+
+local function close_link(gate_address)
+    if not active_links[gate_address] then return false end
+
+    local remote = active_links[gate_address].remote_address
+
+    -- Close both ends
+    active_links[gate_address] = nil
+    if remote and active_links[remote] then
+        active_links[remote] = nil
+    end
+
+    -- Reset states
+    gate_state[gate_address] = "idle"
+    if remote then gate_state[remote] = "idle" end
+    gate_link_tiers[gate_address] = nil
+    gate_link_tiers[remote] = nil
+
+    -- Clean up visuals on both gates
+    local gate_data = local_gates[gate_address]
+    if gate_data then
+        remove_event_horizon(gate_data.pos)
+        reset_keystones(gate_data.pos)
+    end
+    if remote and local_gates[remote] then
+        local remote_data = local_gates[remote]
+        remove_event_horizon(remote_data.pos)
+        reset_keystones(remote_data.pos)
+    end
+
+    return true
+end
+
+-- =============================================================================
+-- Dialing Sequence
+-- =============================================================================
+
+local function hash_to_symbol(s)
+    local h = 0
+    for i = 1, #s do
+        h = (h * 31 + string.byte(s, i)) % 12
+    end
+    return h + 1
+end
+
+compute_dial_sequence = function(dest_address, tier)
+    local route = address_to_route(dest_address)
+    if not route then return {} end
+    local symbols = {}
+
+    local dim = route.dimension or "x"
+    local gid = route.gate_id or "g0_0"
+    local half = math.floor(#gid / 2)
+
+    if tier >= nexus.power.TIER.CROSS_GALAXY then
+        symbols[#symbols+1] = hash_to_symbol(dim)
+    end
+    if tier >= nexus.power.TIER.SAME_GALAXY then
+        symbols[#symbols+1] = hash_to_symbol(dim .. "2")
+    end
+    symbols[#symbols+1] = hash_to_symbol(gid:sub(1, half))
+    symbols[#symbols+1] = hash_to_symbol(gid:sub(half + 1))
+    if tier >= nexus.power.TIER.SAME_GALAXY then
+        symbols[#symbols+1] = hash_to_symbol(dim .. "3")
+    end
+    if tier >= nexus.power.TIER.CROSS_GALAXY then
+        symbols[#symbols+1] = hash_to_symbol(dim .. "4")
+    end
+    symbols[#symbols+1] = hash_to_symbol(dest_address)
+    return symbols
+end
+
+play_dialing_sequence = function(base_pos, symbols, tier, on_complete)
+    local num_symbols = #symbols
+    local per_symbol_time
+    if tier == nexus.power.TIER.CROSS_GALAXY then
+        per_symbol_time = tonumber(core.settings:get("nexus.dial_time_cross_galaxy")) or 2.0
+    elseif tier == nexus.power.TIER.SAME_GALAXY then
+        per_symbol_time = tonumber(core.settings:get("nexus.dial_time_same_galaxy")) or 1.5
+    else
+        per_symbol_time = tonumber(core.settings:get("nexus.dial_time_same_world")) or 1.0
+    end
+
+    local function light_keystone(step)
+        if step > num_symbols then
+            if on_complete then on_complete() end
+            return
+        end
+
+        local color_idx = symbols[step]
+        local color = KEYSTONE_COLORS[color_idx] or "white"
+        local ks_idx = ((step - 1) % 7) + 1
+        local off = KEYSTONE_OFFSETS[ks_idx]
+        local kp = {x = base_pos.x + off[1], y = base_pos.y + off[2], z = base_pos.z + off[3]}
+
+        if is_keystone(core.get_node(kp).name) or is_ancient_keystone(core.get_node(kp).name) then
+            core.swap_node(kp, {name = keystone_lit_name(color)})
+        end
+
+        core.add_particlespawner({
+            amount = 15, time = 0.5,
+            minpos = {x = kp.x - 0.3, y = kp.y - 0.3, z = kp.z - 0.3},
+            maxpos = {x = kp.x + 0.3, y = kp.y + 0.3, z = kp.z + 0.3},
+            minvel = {x = -1, y = 1, z = -1},
+            maxvel = {x = 1, y = 3, z = 1},
+            minexptime = 0.5, maxexptime = 1.0,
+            minsize = 1, maxsize = 3,
+            texture = "nexus_keystone_lit_" .. color .. ".png",
+            glow = 14,
+        })
+
+        core.sound_play("nexus_gate_dial", {
+            pos = kp, max_hear_distance = 20, gain = 0.5,
+            pitch = 0.8 + (step / num_symbols) * 0.5,
+        })
+
+        local timer = core.after(per_symbol_time, function()
+            light_keystone(step + 1)
+        end)
+    end
+
+    -- Reset keystones
+    reset_keystones(base_pos)
+    light_keystone(1)
+end
+
+reset_keystones = function(base_pos)
+    for _, off in ipairs(KEYSTONE_OFFSETS) do
+        local kp = {x = base_pos.x + off[1], y = base_pos.y + off[2], z = base_pos.z + off[3]}
+        if is_keystone(core.get_node(kp).name) then
+            core.swap_node(kp, {name = KEYSTONE_OFF})
+        end
+    end
+end
 
 -- =============================================================================
 -- Unified Dialing Flow
 -- =============================================================================
--- The dialing sequence is purely visual/atmospheric. The gate plays the
--- sequence regardless of whether the destination is valid. Only at the END
--- does the backend check (establish_link) succeed or fail.
---
--- Flow:
---   1. Power check (fail = abort before dialing starts)
---   2. Start visual sequence (keystones light up one by one)
---   3. Player can cancel at any point (stops sequence, resets)
---   4. At sequence end: establish_link → open wormhole (or fail)
---   5. Pad trigger blocked until link is established
 
---- Start the full dialing flow for a destination address.
---- Power is checked first. If sufficient, the visual sequence plays.
---- At the end, the link is established (or fails if address is invalid).
 start_dialing = function(pos, player, gate_address, dest_address)
     local pname = player:get_player_name()
-    core.log("action", "[nexus] start_dialing called: " .. gate_address .. " → " .. dest_address)
 
-    -- Don't allow if already dialing or connected or receiving
     local state = gate_state[gate_address] or "idle"
     if state == "dialing" then
         core.chat_send_player(pname, "[nexus] Gate is already dialing")
-        core.log("action", "[nexus] start_dialing aborted: already dialing")
         return
     end
     if state == "connected" then
         core.chat_send_player(pname, "[nexus] Gate is already linked — close the wormhole first")
-        core.log("action", "[nexus] start_dialing aborted: already connected")
         return
     end
     if state == "receiving" then
-        -- Incoming wormhole is active. Player can walk back through it.
-        -- But if they want to dial somewhere else, they must close it first.
-        core.chat_send_player(pname, "[nexus] This gate has an active wormhole — walk through to travel, or close it first to dial elsewhere")
-        core.log("action", "[nexus] start_dialing aborted: receiving (active wormhole)")
+        core.chat_send_player(pname, "[nexus] This gate has an active wormhole — close it first")
         return
     end
 
-    -- Power check BEFORE dialing
+    -- Power check
     local route = address_to_route(dest_address)
+    local dest_dim = route and route.dimension or ""
+    local my_dim = core.get_meta(pos):get_string("dimension")
+    if my_dim == "" then my_dim = WORLD end
 
-    -- Immediately notify the proxy to prepare the destination world.
-    if route and route.world then
-        nexus._http({
-            url = PROXY .. "/nexus/world/" .. route.world .. "/start",
-            method = "POST",
-            timeout = TIMEOUT,
-        }, function(result)
-            if result.code == 200 then
-                local resp = core.parse_json(result.data)
-                if resp and resp.state == "starting" then
-                    core.chat_send_player(pname, "[nexus] Destination world booting...")
-                end
-            end
-        end)
-    end
-
-    core.log("action", "[nexus] start_dialing: past state checks, checking power...")
     local tier, tier_label = nexus.power.tier_for(
-        GALAXY, WORLD,
-        (route and route.galaxy) or GALAXY,
-        (route and route.world) or WORLD)
+        GALAXY, my_dim, GALAXY, dest_dim)
     local can_afford, perr = nexus.power.check(gate_address, tier)
     if not can_afford then
         core.chat_send_player(pname, "[nexus] " .. perr)
@@ -588,67 +487,47 @@ start_dialing = function(pos, player, gate_address, dest_address)
         return
     end
 
-    -- Start the visual dialing sequence
-    core.log("action", "[nexus] start_dialing: power OK, computing sequence...")
-    local symbols = compute_dial_sequence(dest_address, tier)
-    core.log("action", "[nexus] start_dialing: sequence starting (" .. #symbols .. " glyphs)")
+    -- Start visual sequence
+    local glyph_indices = compute_dial_sequence(dest_address, tier)
+    local glyph_display = nexus.glyphs.get_colored_symbols(glyph_indices)
     gate_state[gate_address] = "dialing"
 
-    core.chat_send_player(pname, "[nexus] Dialing " .. dest_address ..
-        " — " .. #symbols .. " symbols (" .. tier_label .. ")...")
+    core.chat_send_player(pname, "[nexus] Dialing " .. glyph_display ..
+        " — " .. #glyph_indices .. " symbols (" .. tier_label .. ")...")
 
-    play_dialing_sequence(pos, symbols, tier, function()
-        core.log("action", "[nexus] start_dialing: sequence complete, establishing link...")
-        -- Sequence complete — now try to establish the link
-        if gate_state[gate_address] ~= "dialing" then
-            -- Was cancelled during the sequence
-            return
+    play_dialing_sequence(pos, glyph_indices, tier, function()
+        if gate_state[gate_address] ~= "dialing" then return end
+
+        -- Try to establish link
+        local ok, err = establish_link(gate_address, dest_address, pname)
+
+        if ok then
+            gate_state[gate_address] = "connected"
+            gate_link_tiers[gate_address] = tier
+            nexus.power.consume(gate_address, tier)
+            gate_state[dest_address] = "receiving"
+            place_event_horizon(pos)
+            local remote_gate = local_gates[dest_address]
+            if remote_gate then
+                place_event_horizon(remote_gate.pos)
+            end
+            core.chat_send_player(pname, "[nexus] Wormhole established!")
+            core.sound_play("nexus_gate_open", {
+                pos = pos, max_hear_distance = 30, gain = 0.8
+            })
+        else
+            gate_state[gate_address] = "idle"
+            reset_keystones(pos)
+            core.chat_send_player(pname, "[nexus] Dialing failed: " .. err)
+            core.sound_play("nexus_gate_abort", {to_player = pname})
         end
-
-        core.chat_send_player(pname, "[nexus] Establishing wormhole...")
-
-        core.log("action", "[nexus] start_dialing: calling establish_link " .. gate_address .. " -> " .. dest_address)
-        nexus.gate.establish_link(gate_address, dest_address, pname, function(ok, info)
-            if gate_state[gate_address] ~= "dialing" then
-                -- Was cancelled while waiting for link response
-                core.log("action", "[nexus] start_dialing: establish_link result: ok=" .. tostring(ok))
-            if ok then
-                    nexus.gate.close_link(gate_address)
-                end
-                return
-            end
-
-            if gate_state[gate_address] == "dialing" then gate_state[gate_address] = "idle" end
-
-            core.log("action", "[nexus] start_dialing: establish_link result: ok=" .. tostring(ok))
-            if ok then
-                -- Success! Open the wormhole
-                gate_state[gate_address] = "connected"
-                gate_link_tiers[gate_address] = tier
-                nexus.power.consume(gate_address, tier)
-                place_event_horizon(pos)
-                core.chat_send_player(pname, "[nexus] Wormhole established!")
-                core.sound_play("nexus_gate_open", {
-                    pos = pos, max_hear_distance = 30, gain = 0.8
-                })
-            else
-                -- Failed — invalid address, gate doesn't exist, etc.
-                reset_keystones(pos)
-                core.chat_send_player(pname, "[nexus] Dialing failed: " ..
-                    tostring(info))
-                core.sound_play("nexus_gate_abort", {to_player = pname})
-            end
-        end)
     end)
 end
 
---- Cancel an in-progress dialing sequence.
 cancel_dialing = function(pos, player)
-    local meta = core.get_meta(pos)
-    local address = meta:get_string("address")
-
+    local address = core.get_meta(pos):get_string("address")
     if gate_state[address] == "dialing" then
-        if gate_state[address] == "dialing" then gate_state[address] = "idle" end
+        gate_state[address] = "idle"
         reset_keystones(pos)
         core.chat_send_player(player:get_player_name(), "[nexus] Dialing cancelled.")
         core.sound_play("nexus_gate_abort", {
@@ -658,148 +537,17 @@ cancel_dialing = function(pos, player)
     end
     return false
 end
-local KEYSTONE_COLORS = {
-    "red", "orange", "yellow", "green", "cyan", "blue",
-    "violet", "magenta", "white", "pink", "lime", "amber",
-}
--- Expose for worldgen
-nexus._keystone_colors = KEYSTONE_COLORS
 
-local KEYSTONE_OFF = "nexus:keystone_off"
-local function keystone_lit_name(color)
-    return "nexus:keystone_lit_" .. color
-end
-local function is_keystone(name)
-    if name == KEYSTONE_OFF then return true end
-    for _, color in ipairs(KEYSTONE_COLORS) do
-        if name == keystone_lit_name(color) then return true end
-    end
-    return false
-end
+-- =============================================================================
+-- Gate Formspec
+-- =============================================================================
 
--- Hash a string to a color index (1-12)
-local function hash_to_symbol(s)
-    local h = 0
-    for i = 1, #s do
-        h = (h * 31 + string.byte(s, i)) % 12
-    end
-    return h + 1  -- 1-based index into KEYSTONE_COLORS
-end
-
--- Compute the symbol sequence (colors) for a destination address
-compute_dial_sequence = function(dest_address, tier)
-    local route = address_to_route(dest_address)
-    if not route then return {} end
-    local symbols = {}
-    if tier >= nexus.power.TIER.CROSS_GALAXY then
-        symbols[#symbols+1] = hash_to_symbol(route.galaxy or "x")
-    end
-    if tier >= nexus.power.TIER.SAME_GALAXY then
-        symbols[#symbols+1] = hash_to_symbol(route.world or "x")
-    end
-    -- Always include gate_id (split into symbols)
-    local gid = route.gate_id or "g0_0"
-    local half = math.floor(#gid / 2)
-    symbols[#symbols+1] = hash_to_symbol(gid:sub(1, half))
-    symbols[#symbols+1] = hash_to_symbol(gid:sub(half + 1))
-    if tier >= nexus.power.TIER.SAME_GALAXY then
-        symbols[#symbols+1] = hash_to_symbol((route.world or "x") .. "2")
-    end
-    if tier >= nexus.power.TIER.CROSS_GALAXY then
-        symbols[#symbols+1] = hash_to_symbol((route.galaxy or "x") .. "2")
-    end
-    -- Final lock symbol
-    symbols[#symbols+1] = hash_to_symbol(dest_address)
-    return symbols
-end
-
--- Play the dialing sequence: light each keystone one at a time
-play_dialing_sequence = function(base_pos, symbols, tier, on_complete)
-    local num_symbols = #symbols
-    local per_symbol_time
-    if tier == nexus.power.TIER.CROSS_GALAXY then
-        per_symbol_time = DIAL_TIME.cross_galaxy
-    elseif tier == nexus.power.TIER.SAME_GALAXY then
-        per_symbol_time = DIAL_TIME.same_galaxy
-    else
-        per_symbol_time = DIAL_TIME.same_world
-    end
-
-    local function light_keystone(step)
-        if step > num_symbols then
-            -- All keystones lit — final burst then complete
-            if on_complete then on_complete() end
-            return
-        end
-
-        local color_idx = symbols[step]
-        local color = KEYSTONE_COLORS[color_idx] or "white"
-        -- Light the keystone at this position (step 1 = K1, step 2 = K2, etc.)
-        local ks_idx = ((step - 1) % 7) + 1  -- 7 keystones (K1-K7)
-        local off = KEYSTONE_OFFSETS[ks_idx]
-        local kp = {x = base_pos.x + off[1], y = base_pos.y + off[2], z = base_pos.z + off[3]}
-
-        if core.get_node(kp).name == KEYSTONE_OFF or is_keystone(core.get_node(kp).name) then
-            core.swap_node(kp, {name = keystone_lit_name(color)})
-        end
-
-        -- Particle burst at this keystone
-        core.add_particlespawner({
-            amount = 15,
-            time = 0.5,
-            minpos = {x = kp.x - 0.3, y = kp.y - 0.3, z = kp.z - 0.3},
-            maxpos = {x = kp.x + 0.3, y = kp.y + 0.3, z = kp.z + 0.3},
-            minvel = {x = -1, y = 1, z = -1},
-            maxvel = {x = 1, y = 3, z = 1},
-            minexptime = 0.5,
-            maxexptime = 1.0,
-            minsize = 1,
-            maxsize = 3,
-            texture = "nexus_keystone_lit_" .. color .. ".png",
-            glow = 14,
-        })
-
-        -- Dialing sound (rising pitch per step)
-        core.sound_play("nexus_gate_dial", {
-            pos = kp, max_hear_distance = 20, gain = 0.5,
-            pitch = 0.8 + (step / num_symbols) * 0.5,
-        })
-
-        -- Light the next keystone after the delay
-        core.after(per_symbol_time, function()
-            light_keystone(step + 1)
-        end)
-    end
-
-    -- Reset all keystones to off before starting
-    for _, off in ipairs(KEYSTONE_OFFSETS) do
-        local kp = {x = base_pos.x + off[1], y = base_pos.y + off[2], z = base_pos.z + off[3]}
-        if is_keystone(core.get_node(kp).name) then
-            core.swap_node(kp, {name = KEYSTONE_OFF})
-        end
-    end
-
-    light_keystone(1)
-end
-
--- Reset all keystones to unlit (called when link closes)
-reset_keystones = function(base_pos)
-    for _, off in ipairs(KEYSTONE_OFFSETS) do
-        local kp = {x = base_pos.x + off[1], y = base_pos.y + off[2], z = base_pos.z + off[3]}
-        if is_keystone(core.get_node(kp).name) then
-            core.swap_node(kp, {name = KEYSTONE_OFF})
-        end
-    end
-end
 local function show_gate_formspec(pos, player)
     local pname = player:get_player_name()
     local meta = core.get_meta(pos)
     local address = meta:get_string("address")
-    local is_ancient = meta:get_string("ancient") == "true"
-    local linked = gate_state[address] == "connected"
-
-    local title = is_ancient and "Ancient Stargate" or "Stargate"
     local state = gate_state[address] or "idle"
+
     local status_text = "○ IDLE"
     local status_color = "#7A7A7A"
     if state == "connected" then
@@ -813,8 +561,6 @@ local function show_gate_formspec(pos, player)
         status_color = "#FFAA00"
     end
 
-    -- Use Mineclonia's formspec helpers if available, else fallback
-    local LC = "#313131"  -- Mineclonia label color
     local function islot(x, y, w, h)
         if mcl_formspec and mcl_formspec.get_itemslot_bg_v4 then
             return mcl_formspec.get_itemslot_bg_v4(x, y, w, h)
@@ -822,344 +568,91 @@ local function show_gate_formspec(pos, player)
         return ""
     end
 
+    -- Compute glyph sequence for this gate
+    local route = address_to_route(address)
+    local my_dim = meta:get_string("dimension")
+    if my_dim == "" then my_dim = WORLD end
+    local tier = nexus.power.tier_for(GALAXY, my_dim, GALAXY, my_dim)
+    local glyph_indices = compute_dial_sequence(address, tier)
+    local glyph_display = nexus.glyphs.get_colored_symbols(glyph_indices)
+
     local parts = {
         "formspec_version[4]",
         "size[12,18.5]",
-        -- NO no_prepend — let Mineclonia's background theme apply
-        string.format("label[4.5,0.4;%s]", title),
-        string.format(
-            "label[3,0.9;%s]",
-            address),
-        string.format(
-            "label[4.8,1.3;%s%s%s]",
-            core.colorize(status_color, status_text), "", ""),
-
-        -- ── Crystal section ──
+        string.format("label[1,0.4;%s]", core.colorize("#00BFFF", "Ancient Gate")),
+        string.format("label[1,0.9;%s]", glyph_display),
+        "label[4.8,1.3;" .. core.colorize(status_color, status_text) .. "]",
+        -- Crystal section
         "label[0.4,1.9;Crystal]",
         islot(0.6, 2.1, 1, 1),
         string.format("list[nodemeta:%d,%d,%d;crystal;0.6,2.1;1,1;]", pos.x, pos.y, pos.z),
         "label[1.9,2.3;Insert a resonance crystal to load saved addresses]",
-        "label[1.9,2.6;Shift-click from your inventory to insert]",
     }
 
-    -- Crystal content (addresses or PIN)
+    -- Crystal addresses
     local crystal = nexus.crystal.get_gate_crystal(pos)
-
-    if crystal then
-        local is_private = nexus.crystal.is_private(crystal)
-        local unlocked = nexus.crystal.is_gate_unlocked(pos)
-
-        if is_private and not unlocked then
-            -- PIN entry
-            parts[#parts+1] = "label[0.4,3.5;PIN Required]"
+    if crystal and nexus.crystal.is_gate_unlocked(pos) then
+        local addrs = nexus.crystal.get_gate_addresses(pos)
+        local btn_y = 3.5
+        local addr_idx = 0
+        local addr_map = {}
+        for addr, entry in pairs(addrs) do
+            addr_idx = addr_idx + 1
+            addr_map[addr_idx] = addr
+            local safe_label = core.formspec_escape(entry.label)
             parts[#parts+1] = string.format(
-                "label[0.4,3.8;%sPrivate crystal — enter PIN to activate%s]",
-                core.colorize("#C87000", ""), "")
-            parts[#parts+1] = "pwd[4,4.1;4,0.8;gate_pin;Enter PIN]"
-            parts[#parts+1] = "button[4,4.9;4,0.7;unlock;Unlock Crystal]"
-        elseif unlocked then
-            -- Saved addresses
-            parts[#parts+1] = "label[0.4,3.5;Saved Addresses]"
-
-            local addrs = nexus.crystal.get_gate_addresses(pos)
-            local has_addrs = false
-            local btn_x = 0.4
-            local btn_y = 3.9
-            local col = 0
-            local addr_map = {}
-            local addr_idx = 0
-            for addr, entry in pairs(addrs) do
-                has_addrs = true
-                addr_idx = addr_idx + 1
-                addr_map[addr_idx] = addr
-                local lock = entry.encrypted and " \226\150\160" or ""
-                local safe_label = core.formspec_escape(entry.label .. lock)
-                parts[#parts+1] = string.format(
-                    "button[%f,%f;5.5,0.7;addrbtn_%d;%s]",
-                    btn_x, btn_y, addr_idx, safe_label)
-                col = col + 1
-                if col >= 2 then
-                    col = 0
-                    btn_x = 0.4
-                    btn_y = btn_y + 0.8
-                else
-                    btn_x = 6.1
-                end
-            end
-
-            local pmeta = player:get_meta()
-            pmeta:set_string("nexus_addr_map", core.write_json(addr_map))
-
-            if not has_addrs then
-                pmeta:set_string("nexus_addr_map", "")
-                parts[#parts+1] = "label[0.4,4.1;This crystal has no saved addresses]"
-            end
+                "button[0.4,%f;11,0.7;addrbtn_%d;%s]",
+                btn_y, addr_idx, safe_label)
+            btn_y = btn_y + 0.8
         end
-    else
-        parts[#parts+1] = "label[0.4,3.5;Addresses]"
-        parts[#parts+1] = "label[0.4,3.8;No crystal inserted]"
+        local pmeta = player:get_meta()
+        pmeta:set_string("nexus_addr_map", core.write_json(addr_map))
     end
 
-    -- ── Manual dial section ──
-    parts[#parts+1] = "label[0.4,7.2;Manual Dial]"
-    parts[#parts+1] = "field[0.4,7.9;7.5,0.9;dest;Destination Address;]"
+    -- Manual dial
+    parts[#parts+1] = "label[0.4,7.2;Manual Dial (type symbol numbers: 1-12)"
+    parts[#parts+1] = "field[0.4,7.9;7.5,0.9;dest;Symbol sequence (e.g. 1,5,3,8);]"
     parts[#parts+1] = "button[0.4,8.9;3.5,0.8;dial;Dial]"
     parts[#parts+1] = "button[4.1,8.9;3.5,0.8;clear_dial;Clear]"
     parts[#parts+1] = "button[7.8,8.9;3.5,0.8;close;Close Link]"
 
-    -- Glyph dial pad (12 symbol buttons in a 4x3 grid)
-    local pad_y = 10.0
+    -- Glyph dial pad
     parts[#parts+1] = "label[0.4,9.7;Symbols]"
     local all_glyphs = nexus.glyphs.get_all()
     for i, g in ipairs(all_glyphs) do
         local col = (i - 1) % 4
         local row = math.floor((i - 1) / 4)
         local bx = 0.4 + col * 1.3
-        local by = pad_y + row * 1.0
+        local by = 10.0 + row * 1.0
         parts[#parts+1] = string.format(
             "image_button[%f,%f;1,1;nexus_glyph_off_%s.png;glyph_%d;%s]",
             bx, by, g.name, i, g.symbol)
     end
 
-    -- ── Inventory section ──
+    -- Inventory
     parts[#parts+1] = "label[0.4,13.5;Inventory]"
     parts[#parts+1] = islot(1, 13.9, 8, 4)
-    parts[#parts+1] = string.format("list[current_player;main;1,13.9;8,4;]")
+    parts[#parts+1] = "list[current_player;main;1,13.9;8,4;]"
     parts[#parts+1] = string.format("listring[nodemeta:%d,%d,%d;crystal]", pos.x, pos.y, pos.z)
     parts[#parts+1] = "listring[current_player;main]"
 
-    -- Store position in player meta
+    -- Store position
     local pmeta = player:get_meta()
-    pmeta:set_string("nexus_gate_pos",
-        pos.x .. "," .. pos.y .. "," .. pos.z)
+    pmeta:set_string("nexus_gate_pos", pos.x .. "," .. pos.y .. "," .. pos.z)
 
     core.show_formspec(pname, "nexus:gate_dial", table.concat(parts, "\n"))
 end
 
--- Expose formspec function for worldgen's ancient gate blocks
 nexus._show_gate_formspec = show_gate_formspec
 
-core.register_node(GATE_NODE, {
-    description = "Stargate Base",
-    tiles = {
-        "nexus_gate_block.png",  -- top
-        "nexus_gate_block.png",  -- bottom
-        "nexus_gate_base.png",   -- right
-        "nexus_gate_base.png",   -- left
-        "nexus_gate_base.png",   -- back
-        "nexus_gate_base.png",   -- front
-    },
-    groups = {cracky = 3, oddly_breakable_by_hand = 2},
-    light_source = 8,
-
-    on_construct = function(pos)
-        register_gate_at(pos)
-        -- Crystal slot inventory (1 slot)
-        local meta = core.get_meta(pos)
-        local inv = meta:get_inventory()
-        inv:set_size("crystal", 1)
-    end,
-
-    on_destruct = function(pos)
-        -- Drop the crystal before unregistering
-        local meta = core.get_meta(pos)
-        local inv = meta:get_inventory()
-        if inv:get_list("crystal") then
-            local crystal = inv:get_stack("crystal", 1)
-            if not crystal:is_empty() then
-                core.add_item(pos, crystal)
-            end
-        end
-        nexus.crystal.lock(pos)
-        unregister_gate_at(pos)
-    end,
-
-    on_rightclick = function(pos, node, player, itemstack, pointed_thing)
-        show_gate_formspec(pos, player)
-    end,
-
-    -- Allow placing crystals from the hand
-    allow_metadata_inventory_put = function(pos, listname, index, stack, player)
-        if listname == "crystal" and nexus.crystal.is_crystal(stack) then
-            return 1
-        end
-        return 0
-    end,
-
-    allow_metadata_inventory_take = function(pos, listname, index, stack, player)
-        return 1
-    end,
-
-    on_metadata_inventory_put = function(pos, listname, index, stack, player)
-        -- Lock the gate crystal slot when a new crystal is inserted
-        nexus.crystal.lock(pos)
-        -- Refresh the formspec so address buttons appear immediately
-        show_gate_formspec(pos, player)
-    end,
-
-    on_metadata_inventory_take = function(pos, listname, index, stack, player)
-        -- Lock when removed
-        nexus.crystal.lock(pos)
-        -- Refresh so the buttons/PIN disappear
-        show_gate_formspec(pos, player)
-    end,
-})
-
 -- =============================================================================
--- Keystone Nodes (unlit + 12 color-lit variants)
--- =============================================================================
--- Each keystone is a dark stone block when unlit. When its symbol is dialed,
--- it swaps to a lit color variant with light emission. The color sequence
--- during dialing IS the address — players can recognize destinations by
--- their color pattern.
-
--- Forward-declared destruct handler (defined after node registrations)
-local keystone_destruct_handler
-
--- Span block (structural frame between keystones)
-core.register_node(SPAN_NODE, {
-    description = "Gate Span",
-    tiles = {"nexus_span.png"},
-    groups = {cracky = 3, not_in_creative_inventory = 1},
-    light_source = 1,
-    drop = "",
-    on_destruct = keystone_destruct_handler,  -- same cascade cleanup
-})
-
--- Unlit keystone
-core.register_node(KEYSTONE_OFF, {
-    description = "Gate Keystone",
-    tiles = {"nexus_keystone_off.png"},
-    groups = {cracky = 3, not_in_creative_inventory = 1},
-    light_source = 2,
-    drop = "",
-    on_destruct = keystone_destruct_handler,
-})
-
--- Lit keystones (one per color)
-for _, color in ipairs(KEYSTONE_COLORS) do
-    core.register_node(keystone_lit_name(color), {
-        description = "Gate Keystone (" .. color .. ")",
-        tiles = {"nexus_keystone_lit_" .. color .. ".png"},
-        groups = {cracky = 3, not_in_creative_inventory = 1},
-        light_source = 12,
-        drop = "",
-        on_destruct = keystone_destruct_handler,
-    })
-end
-
--- Destruct handler: if any keystone is destroyed, remove the entire gate
-local function keystone_destruct_handler(pos)
-    for addr, data in pairs(local_gates) do
-        local base_pos = data.pos
-        for _, off in ipairs(KEYSTONE_OFFSETS) do
-            local kp = {x = base_pos.x + off[1], y = base_pos.y + off[2], z = base_pos.z + off[3]}
-            if vector.equals(kp, pos) then
-                remove_event_horizon(base_pos)
-                -- Remove all keystones
-                for _, off2 in ipairs(KEYSTONE_OFFSETS) do
-                    local p = {x = base_pos.x + off2[1], y = base_pos.y + off2[2], z = base_pos.z + off2[3]}
-                    if is_keystone(core.get_node(p).name) or core.get_node(p).name == SPAN_NODE then
-                        core.remove_node(p)
-                    end
-                end
-                -- Remove the base
-                if core.get_node(base_pos).name == GATE_NODE then
-                    core.remove_node(base_pos)
-                end
-                return
-            end
-        end
-    end
-end
-
--- Event horizon — the glowing portal surface. Non-solid, ephemeral.
-core.register_node(HORIZON_NODE, {
-    description = "Event Horizon",
-    tiles = {{
-        name = "nexus_event_horizon_anim.png",
-        animation = {type = "vertical_frames", aspect_w = 16, aspect_h = 16, length = 4},
-    }},
-    -- glasslike connects adjacent same-type blocks and hides internal faces
-    -- (unlike allfaces which renders every face, showing walls through alpha)
-    drawtype = "glasslike",
-    paramtype = "light",
-    use_texture_alpha = "blend",
-    groups = {not_in_creative_inventory = 1, unbreakable = 1},
-    light_source = 14,
-    walkable = false,
-    pointable = false,
-    diggable = false,
-    drop = "",
-    post_effect_color = {a = 100, r = 30, g = 60, b = 180},
-})
-
-
-
--- Re-register gates on server restart (LBM fires for loaded nodes)
-core.register_lbm({
-    label = "Re-register stargates",
-    name = "nexus:gate_reregister",
-    nodenames = {GATE_NODE},
-    run_at_every_load = true,
-    action = function(pos, node)
-        register_gate_at(pos)
-    end,
-})
-
--- On server startup, re-register ALL gates from mod_storage — even ones in
--- unloaded chunks. This ensures gates are always dialable as soon as the
--- server starts, without needing a player to physically visit them first.
-local function reregister_gates()
-    local keys = storage:to_table().fields
-    local count = 0
-    for key, val in pairs(keys) do
-        if key:match("^gate_") and val ~= "" then
-            local parts = string.split(val, ",")
-            local pos = {
-                x = tonumber(parts[1]),
-                y = tonumber(parts[2]),
-                z = tonumber(parts[3]),
-            }
-            if pos.x then
-                -- Trust the storage — register from stored position.
-                -- Don't check the node (chunk may not be loaded/generated yet).
-                -- The LBM will re-validate when a player actually visits.
-                register_gate_at(pos)
-                count = count + 1
-            end
-        end
-    end
-    if count > 0 then
-        core.log("action", "[nexus] re-registered " .. count ..
-            " gate(s) from storage on startup")
-    end
-    return count
-end
-
-core.register_on_mods_loaded(function()
-    -- Defer all registration attempts — map isn't available during on_mods_loaded.
-    -- Try at 1s, 3s, and 5s to cover proxy startup timing.
-    core.after(1, reregister_gates)
-    core.after(3, reregister_gates)
-    core.after(5, reregister_gates)
-end)
-
--- =============================================================================
--- Formspec Handler (Dial / Close)
+-- Formspec Handler
 -- =============================================================================
 
 core.register_on_player_receive_fields(function(player, formname, fields)
     if formname ~= "nexus:gate_dial" then return end
 
     local pname = player:get_player_name()
-    -- Debug: log all field names so we can see what the client sends
-    local field_names = {}
-    for k, v in pairs(fields) do
-        table.insert(field_names, k .. (type(v) == "string" and v ~= "" and "=" .. v or ""))
-    end
-    core.log("action", "[nexus] gate_dial fields from " .. pname .. ": " ..
-        table.concat(field_names, ", "))
     local pmeta = player:get_meta()
     local pos_str = pmeta:get_string("nexus_gate_pos")
     if pos_str == "" then return end
@@ -1168,48 +661,26 @@ core.register_on_player_receive_fields(function(player, formname, fields)
     local pos = {x = tonumber(parts[1]), y = tonumber(parts[2]), z = tonumber(parts[3])}
     local address = core.get_meta(pos):get_string("address")
 
-    -- Handle PIN unlock
-    if fields.unlock then
-        local ok, err = nexus.crystal.try_unlock(pos, fields.gate_pin or "")
-        core.log("action", "[nexus] start_dialing: establish_link result: ok=" .. tostring(ok))
-            if ok then
-            core.chat_send_player(pname, "[nexus] Crystal unlocked.")
-        else
-            core.chat_send_player(pname, "[nexus] " .. (err or "Unlock failed."))
-        end
-        show_gate_formspec(pos, player)
-        return true
-    end
-
-    -- Handle crystal address button clicks (numeric index → actual address)
-    local dial_addr = nil
-
-    -- Handle glyph dial pad clicks — build up the sequence
-    local glyph_sequence = pmeta:get_string("nexus_dial_seq") or ""
+    -- Clear button
     if fields.clear_dial then
         cancel_dialing(pos, player)
-        glyph_sequence = ""
         pmeta:set_string("nexus_dial_seq", "")
-        pmeta:set_string("nexus_dial_indices", "")
         show_gate_formspec(pos, player)
         return true
     end
 
+    -- Glyph pad clicks
+    local glyph_sequence = pmeta:get_string("nexus_dial_seq") or ""
     for field_name in pairs(fields) do
         local glyph_idx = field_name:match("^glyph_(%d+)$")
         if glyph_idx then
-            local idx = tonumber(glyph_idx)
-            -- Add to sequence (max 7 glyphs)
-            if #glyph_sequence < 14 then  -- "1,2,3" format, 7 entries
-                if glyph_sequence ~= "" then
-                    glyph_sequence = glyph_sequence .. ","
-                end
-                glyph_sequence = glyph_sequence .. idx
+            if #glyph_sequence < 14 then
+                if glyph_sequence ~= "" then glyph_sequence = glyph_sequence .. "," end
+                glyph_sequence = glyph_sequence .. glyph_idx
                 pmeta:set_string("nexus_dial_seq", glyph_sequence)
-                -- Play a dial sound per glyph
                 core.sound_play("nexus_gate_dial", {
                     pos = pos, max_hear_distance = 20, gain = 0.3,
-                    pitch = 0.8 + (idx / 12) * 0.4,
+                    pitch = 0.8 + (tonumber(glyph_idx) / 12) * 0.4,
                 })
             end
             show_gate_formspec(pos, player)
@@ -1217,270 +688,102 @@ core.register_on_player_receive_fields(function(player, formname, fields)
         end
     end
 
+    -- Crystal address button clicks
+    local dial_addr = nil
     for field_name in pairs(fields) do
         local clicked_idx = field_name:match("^addrbtn_(%d+)$")
         if clicked_idx then
             local addr_map_str = pmeta:get_string("nexus_addr_map")
-            if addr_map_str == "" then
-                core.chat_send_player(pname, "[nexus] ERROR: no address map found")
-                core.sound_play("nexus_gate_abort", {to_player = pname})
-                return true
+            if addr_map_str ~= "" then
+                local addr_map = core.parse_json(addr_map_str)
+                dial_addr = addr_map and addr_map[tonumber(clicked_idx)]
+                if dial_addr then break end
             end
-            local addr_map = core.parse_json(addr_map_str)
-            local dest = addr_map and addr_map[tonumber(clicked_idx)]
-            if not dest then
-                core.chat_send_player(pname, "[nexus] ERROR: address button " ..
-                    clicked_idx .. " not in map")
-                core.sound_play("nexus_gate_abort", {to_player = pname})
-                return true
-            end
-            dial_addr = dest
-            core.chat_send_player(pname, "[nexus] Dialing " .. dest .. "...")
-            core.sound_play("nexus_gate_dial", {to_player = pname})
-            break
         end
     end
 
+    -- Dial button
     if dial_addr or fields.dial then
         local dest = dial_addr
 
-        -- If no crystal address was clicked, check for glyph sequence
-        if not dest and glyph_sequence ~= "" then
+        -- If no crystal address, check for manual symbol entry
+        if not dest and (fields.dest or ""):trim() ~= "" then
+            local typed = (fields.dest):trim()
+            -- Parse comma-separated numbers into glyph indices
             local indices = {}
-            for idx_str in glyph_sequence:gmatch("(%d+)") do
-                indices[#indices+1] = tonumber(idx_str)
+            for num in typed:gmatch("(%d+)") do
+                indices[#indices+1] = tonumber(num)
             end
-
-            local symbols = nexus.glyphs.get_colored_symbols(indices)
-            core.chat_send_player(pname, "[nexus] Dialing: " .. symbols)
-
-            -- Query the proxy for a matching gate
-            local payload = core.write_json({glyphs = indices})
-            nexus._http({
-                url = PROXY .. "/nexus/glyphs/lookup",
-                method = "POST",
-                data = payload,
-                timeout = TIMEOUT,
-                extra_headers = {"Content-Type: application/json"},
-            }, function(result)
-                if result.code == 200 then
-                    local resp = core.parse_json(result.data)
-                    if resp and resp.ok and resp.address then
-                        start_dialing(pos, player, address, resp.address)
+            if #indices > 0 then
+                -- Convert glyphs to a destination gate address
+                dest = nil
+                for addr, data in pairs(local_gates) do
+                    local route = address_to_route(addr)
+                    if route then
+                        local tier = nexus.power.tier_for(GALAXY, data.dimension, GALAXY, data.dimension)
+                        local gate_glyphs = compute_dial_sequence(addr, tier)
+                        if #gate_glyphs == #indices then
+                            local match = true
+                            for i, idx in ipairs(indices) do
+                                if gate_glyphs[i] ~= idx then
+                                    match = false
+                                    break
+                                end
+                            end
+                            if match then
+                                dest = addr
+                                break
+                            end
+                        end
                     end
-                else
-                    local resp = core.parse_json(result.data)
-                    local msg = (resp and resp.message) or "No response"
-                    core.chat_send_player(pname, "[nexus] " .. msg)
-                    core.sound_play("nexus_gate_abort", {to_player = pname})
                 end
-            end)
-
-            pmeta:set_string("nexus_dial_seq", "")
-            return true
-        end
-
-        -- Text-based fallback (crystals store text addresses)
-        if not dest then
-            local typed = (fields.dest or ""):trim()
-            if typed ~= "" then
-                dest = typed
+                if not dest then
+                    core.chat_send_player(pname, "[nexus] No gate found for that symbol sequence")
+                    core.sound_play("nexus_gate_abort", {to_player = pname})
+                    return true
+                end
             end
         end
 
         if not dest then
-            core.chat_send_player(pname, "[nexus] Enter a glyph sequence or insert a crystal")
+            core.chat_send_player(pname, "[nexus] Enter symbols or insert a crystal")
             return true
         end
-
-        -- Start the unified dialing flow
         start_dialing(pos, player, address, dest)
         return true
 
     elseif fields.close then
-        -- If dialing, cancel it. Otherwise close the link.
-        if cancel_dialing(pos, player) then
-            return true
-        end
-        nexus.gate.close_link(address, function(ok)
-            gate_state[address] = "idle"
-            gate_link_tiers[address] = nil
-            remove_event_horizon(pos)
-            reset_keystones(pos)
-            core.log("action", "[nexus] start_dialing: establish_link result: ok=" .. tostring(ok))
-            if ok then
-                core.chat_send_player(pname, "[nexus] Wormhole closed.")
-                core.sound_play("nexus_gate_close", {
-                    pos = pos, max_hear_distance = 30, gain = 0.8
-                })
-            end
-            show_gate_formspec(pos, player)
-        end)
+        if cancel_dialing(pos, player) then return true end
+        close_link(address)
+        core.chat_send_player(pname, "[nexus] Wormhole closed.")
         return true
     end
 
-    return true  -- handled
+    return true
 end)
 
 -- =============================================================================
--- Pad Trigger (Walk-Through Travel)
+-- Pad Trigger — walk through gate to travel
 -- =============================================================================
 
--- Check for players walking into linked gates.
 local pad_timer = 0
 core.register_globalstep(function(dtime)
     pad_timer = pad_timer + dtime
-    if pad_timer < 0.3 then return end  -- ~3x/second
+    if pad_timer < 0.3 then return end
     pad_timer = 0
 
     for address, gate_data in pairs(local_gates) do
         if gate_state[address] == "connected" or gate_state[address] == "receiving" then
-            -- Check at feet level (y+1) where the player walks through the opening.
-            -- The center at y+2 is too high — standing on the base block puts feet at y+1,
-            -- which is 1 block below center and barely within the old 1.5 radius.
             local trigger_pos = vector.new(gate_data.pos)
-            trigger_pos.y = trigger_pos.y + 1  -- feet level at the portal opening
-            -- Block travel if this gate is currently dialing or not linked
-            if gate_state[address] == "dialing" then return end
-            if gate_state[address] ~= "connected" and gate_state[address] ~= "receiving" then return end
+            trigger_pos.y = trigger_pos.y + 1
             local objects = core.get_objects_inside_radius(trigger_pos, 1.5)
             for _, obj in ipairs(objects) do
                 if obj:is_player() then
-                    nexus.gate.travel_player(obj, address)
-                end
-            end
-        end
-    end
-end)
-
--- =============================================================================
--- Item Transfer Through Gates
--- =============================================================================
--- Dropped items entering a linked gate are captured, sent to the proxy,
--- and recreated at the destination gate with transformed velocity.
--- Items use data transfer (destroy+recreate), NOT connection hop.
-
---- Serialize an ItemStack for transfer
-local function serialize_item(stack)
-    local entry = {
-        name = stack:get_name(),
-        count = stack:get_count(),
-        wear = stack:get_wear(),
-    }
-    local meta = stack:get_meta()
-    local fields = meta:to_table().fields
-    if next(fields) then
-        entry.meta = fields
-    end
-    return entry
-end
-
---- Rotate a velocity vector by an angle (radians), keeping Y unchanged.
-local function transform_velocity(vel, angle)
-    local cos_a = math.cos(angle)
-    local sin_a = math.sin(angle)
-    return {
-        x = vel.x * cos_a - vel.z * sin_a,
-        y = vel.y,
-        z = vel.x * sin_a + vel.z * cos_a,
-    }
-end
-
---- Send an item through a linked gate to the destination.
-function nexus.gate.send_item(gate_address, itemstack, velocity, owner)
-    -- Look up the link to find the destination
-    nexus.gate.get_link(gate_address, function(link)
-        if not link or not link.linked then return end
-
-        local item_data = serialize_item(itemstack)
-        local payload = core.write_json({
-            entry_gate = gate_address,
-            destination_gate = link.remote_address,
-            item = item_data,
-            velocity = velocity or {x = 0, y = 0, z = 0},
-            owner = owner or "",
-        })
-
-        gate_http({
-            url = PROXY .. "/nexus/item",
-            method = "POST",
-            data = payload,
-            timeout = TIMEOUT,
-        }, function(result)
-            if result.code ~= 200 then
-                core.log("warning", "[nexus] item send failed for " ..
-                    gate_address .. ": HTTP " .. result.code)
-            end
-        end)
-    end)
-end
-
---- Fetch and recreate items arriving at a local gate.
-local function fetch_incoming_items(address, gate_data)
-    gate_http({
-        url = PROXY .. "/nexus/item/" .. address,
-        method = "GET",
-        timeout = TIMEOUT,
-    }, function(result)
-        if result.code ~= 200 then return end
-        local resp = core.parse_json(result.data)
-        if not resp or not resp.items or resp.count == 0 then return end
-
-        local pos = gate_data.arrival or gate_data.center or gate_data.pos
-        for _, qi in ipairs(resp.items) do
-            -- Reconstruct the ItemStack
-            local item_data = qi.item or {}
-            local stack = ItemStack({
-                name = item_data.name,
-                count = item_data.count,
-                wear = item_data.wear or 0,
-            })
-            -- Restore item metadata
-            if item_data.meta then
-                local meta = stack:get_meta()
-                for key, value in pairs(item_data.meta) do
-                    meta:set_string(key, value)
-                end
-            end
-
-            -- Create the item at the arrival point (in front of gate, clear of trigger zone)
-            local obj = core.add_item(pos, stack)
-            if obj then
-                -- Give it outward velocity so it flies away from the gate
-                obj:set_velocity({
-                    x = qi.velocity and qi.velocity.x or 0,
-                    y = qi.velocity and qi.velocity.y or 3,
-                    z = qi.velocity and -(qi.velocity.z) or -3,
-                })
-            end
-
-            core.log("action", "[nexus] item arrived at " .. address ..
-                ": " .. (item_data.name or "?") ..
-                " x" .. (item_data.count or 1))
-        end
-    end)
-end
-
--- Item sensor: detect dropped items entering linked gates (outgoing)
-local item_sensor_timer = 0
-core.register_globalstep(function(dtime)
-    item_sensor_timer = item_sensor_timer + dtime
-    if item_sensor_timer < 0.2 then return end  -- 5x/second
-    item_sensor_timer = 0
-
-    for address, gate_data in pairs(local_gates) do
-        if gate_state[address] == "connected" or gate_state[address] == "receiving" then
-            local pos = gate_data.center or gate_data.pos
-            local objects = core.get_objects_inside_radius(pos, 1.5)
-            for _, obj in ipairs(objects) do
-                local ent = obj:get_luaentity()
-                if ent and ent.name == "__builtin:item" and not ent._gate_sent then
-                    ent._gate_sent = true  -- prevent double-capture
-                    local stack = ItemStack(ent.itemstring)
-                    if not stack:is_empty() then
-                        local vel = obj:get_velocity()
-                        nexus.gate.send_item(address, stack, vel)
-                        obj:remove()  -- remove from origin
+                    local link = active_links[address]
+                    if link then
+                        -- Travel via dimension switch!
+                        core.change_player_dimension(obj:get_player_name(),
+                            link.remote_dimension, link.remote_arrival)
                     end
                 end
             end
@@ -1488,415 +791,220 @@ core.register_globalstep(function(dtime)
     end
 end)
 
--- Incoming item poller: fetch items waiting at our gates
-local item_poll_timer = 0
-core.register_globalstep(function(dtime)
-    item_poll_timer = item_poll_timer + dtime
-    if item_poll_timer < 0.5 then return end  -- 2x/second
-    item_poll_timer = 0
+-- =============================================================================
+-- Gate Block Registration
+-- =============================================================================
 
-    for address, gate_data in pairs(local_gates) do
-        fetch_incoming_items(address, gate_data)
+core.register_node(GATE_NODE, {
+    description = "Stargate Base",
+    tiles = {"nexus_gate_block.png", "nexus_gate_block.png", "nexus_gate_base.png",
+             "nexus_gate_base.png", "nexus_gate_base.png", "nexus_gate_base.png"},
+    groups = {cracky = 3, oddly_breakable_by_hand = 2},
+    light_source = 8,
+
+    on_construct = function(pos)
+        -- Determine which dimension we're in
+        -- For now, use the world name from config
+        register_gate_at(pos, WORLD)
+    end,
+
+    on_destruct = function(pos)
+        -- Drop crystal
+        local meta = core.get_meta(pos)
+        local inv = meta:get_inventory()
+        if inv:get_list("crystal") then
+            local crystal = inv:get_stack("crystal", 1)
+            if not crystal:is_empty() then
+                core.add_item(pos, crystal)
+            end
+        end
+        unregister_gate_at(pos)
+    end,
+
+    on_rightclick = function(pos, node, player, itemstack, pointed_thing)
+        show_gate_formspec(pos, player)
+    end,
+
+    allow_metadata_inventory_put = function(pos, listname, index, stack, player)
+        if listname == "crystal" and nexus.crystal and nexus.crystal.is_crystal(stack) then
+            return 1
+        end
+        return 0
+    end,
+
+    allow_metadata_inventory_take = function(pos, listname, index, stack, player)
+        return stack:get_count()
+    end,
+
+    on_metadata_inventory_put = function(pos, listname, index, stack, player)
+        if nexus.crystal then nexus.crystal.lock(pos) end
+        show_gate_formspec(pos, player)
+    end,
+
+    on_metadata_inventory_take = function(pos, listname, index, stack, player)
+        if nexus.crystal then nexus.crystal.lock(pos) end
+        show_gate_formspec(pos, player)
+    end,
+})
+
+-- Keystone nodes
+core.register_node(KEYSTONE_OFF, {
+    description = "Gate Keystone",
+    tiles = {"nexus_keystone_off.png"},
+    groups = {cracky = 3, not_in_creative_inventory = 1},
+    light_source = 2,
+    drop = "",
+})
+
+for _, color in ipairs(KEYSTONE_COLORS) do
+    core.register_node(keystone_lit_name(color), {
+        description = "Gate Keystone (" .. color .. ")",
+        tiles = {"nexus_keystone_lit_" .. color .. ".png"},
+        groups = {cracky = 3, not_in_creative_inventory = 1},
+        light_source = 12,
+        drop = "",
+    })
+end
+
+-- Span blocks
+core.register_node("nexus:gate_span", {
+    description = "Gate Span",
+    tiles = {"nexus_span.png"},
+    groups = {cracky = 3, not_in_creative_inventory = 1},
+    light_source = 1,
+    drop = "",
+})
+
+-- Re-register gates from storage on restart
+local function reregister_gates()
+    local keys = storage:to_table().fields
+    local count = 0
+    for key, val in pairs(keys) do
+        if key:match("^gate_") and val ~= "" then
+            local parts = string.split(val, ",")
+            local pos = {x = tonumber(parts[1]), y = tonumber(parts[2]), z = tonumber(parts[3])}
+            local dim = parts[4] or WORLD
+            if pos.x then
+                register_gate_at(pos, dim)
+                count = count + 1
+            end
+        end
     end
+    if count > 0 then
+        core.log("action", "[nexus] re-registered " .. count .. " gate(s) from storage")
+    end
+end
+
+core.register_on_mods_loaded(function()
+    core.after(2, reregister_gates)
 end)
 
 -- =============================================================================
--- Chat Commands (for testing / convenience)
+-- Chat Commands
 -- =============================================================================
 
--- /placegate — auto-build a complete stargate at the player's position
--- Places a base block and all ring blocks. For quick testing.
 core.register_chatcommand("placegate", {
     params = "",
-    description = "Build a complete hexagonal stargate at your position",
+    description = "Build a complete stargate at your position",
     privs = {give = true},
     func = function(name)
         local player = core.get_player_by_name(name)
         if not player then return false end
-
         local pos = vector.round(player:get_pos())
         pos.y = math.floor(pos.y)
 
-        -- Check area is clear (keystones + portal)
-        local blocked = false
         for _, off in ipairs(KEYSTONE_OFFSETS) do
             local p = {x = pos.x + off[1], y = pos.y + off[2], z = pos.z + off[3]}
             if core.get_node(p).name ~= "air" then
-                blocked = true
-                break
-            end
-        end
-        if not blocked then
-            for _, off in ipairs(PORTAL_OFFSETS) do
-                local p = {x = pos.x + off[1], y = pos.y + off[2], z = pos.z + off[3]}
-                if core.get_node(p).name ~= "air" then
-                    blocked = true
-                    break
-                end
+                return false, "Area not clear"
             end
         end
 
-        if blocked then
-            return false, "Area not clear — need open space for the hexagonal gate"
-        end
-
-        -- Place keystone blocks at each vertex
         for _, off in ipairs(KEYSTONE_OFFSETS) do
             local p = {x = pos.x + off[1], y = pos.y + off[2], z = pos.z + off[3]}
             core.set_node(p, {name = KEYSTONE_OFF})
         end
-
-        -- Place span blocks between vertices
         for _, off in ipairs(SPAN_OFFSETS) do
             local p = {x = pos.x + off[1], y = pos.y + off[2], z = pos.z + off[3]}
-            core.set_node(p, {name = SPAN_NODE})
+            core.set_node(p, {name = "nexus:gate_span"})
         end
 
-        -- Place base block (triggers on_construct → registration)
         core.set_node(pos, {name = GATE_NODE})
-
         local address = core.get_meta(pos):get_string("address")
-        return true, "Hexagonal stargate built: " .. address
+        local route = address_to_route(address)
+        local tier = nexus.power.tier_for(GALAXY, WORLD, GALAXY, WORLD)
+        local glyphs = compute_dial_sequence(address, tier)
+        local symbols = nexus.glyphs.get_colored_symbols(glyphs)
+        return true, "Gate built! Your symbols: " .. symbols
     end,
 })
 
--- /dial <address> — dial from the nearest gate
-core.register_chatcommand("dial", {
-    params = "<destination_address>",
-    description = "Dial another stargate from the nearest gate",
-    privs = {},
-    func = function(name, param)
-        local dest = param:trim()
-        if dest == "" then
-            return false, "Usage: /dial <address> (e.g. /dial beta:g10_20)"
-        end
-
-        local player = core.get_player_by_name(name)
-        if not player then return false, "Player not found" end
-
-        -- Find nearest gate
-        local ppos = player:get_pos()
-        local nearest_addr = nil
-        local nearest_dist = math.huge
-        for addr, data in pairs(local_gates) do
-            local dist = vector.distance(ppos, data.pos)
-            if dist < nearest_dist then
-                nearest_dist = dist
-                nearest_addr = addr
-            end
-        end
-
-        if not nearest_addr then
-            return false, "No stargate found on this server"
-        end
-        if nearest_dist > 100 then
-            return false, "Nearest stargate is too far (" ..
-                math.floor(nearest_dist) .. " blocks)"
-        end
-
-        -- Power check BEFORE dialing
-        local route = address_to_route(dest)
-        core.log("action", "[nexus] start_dialing: past state checks, checking power...")
-    local tier, tier_label = nexus.power.tier_for(
-            GALAXY, WORLD,
-            (route and route.galaxy) or GALAXY,
-            (route and route.world) or WORLD)
-        local can_afford, perr = nexus.power.check(nearest_addr, tier)
-        if not can_afford then
-            return false, perr
-        end
-
-        core.chat_send_player(name, "[nexus] Dialing " .. dest ..
-            " from " .. nearest_addr .. "...")
-
-        nexus.gate.establish_link(nearest_addr, dest, name, function(ok, info)
-            core.log("action", "[nexus] start_dialing: establish_link result: ok=" .. tostring(ok))
-            if ok then
-                gate_state[nearest_addr] = "connected"
-                -- Consume dial cost and track tier for upkeep
-                nexus.power.consume(nearest_addr, tier)
-                gate_link_tiers[nearest_addr] = tier
-                local gate_data = local_gates[nearest_addr]
-                if gate_data then
-                    place_event_horizon(gate_data.pos)
-                    core.sound_play("nexus_gate_open", {
-                        pos = gate_data.center or gate_data.pos,
-                        max_hear_distance = 30, gain = 0.8
-                    })
-                end
-                core.chat_send_player(name, "[nexus] Wormhole established! Walk into the gate to travel.")
-            else
-                core.chat_send_player(name, "[nexus] Dialing failed: " ..
-                    tostring(info))
-            end
-        end)
-
-        return true
-    end,
-})
-
--- /removegate — remove the nearest gate (for cleanup of old/broken gates)
 core.register_chatcommand("removegate", {
     params = "",
-    description = "Remove the nearest stargate and all its blocks",
+    description = "Remove the nearest stargate",
     privs = {give = true},
     func = function(name)
         local player = core.get_player_by_name(name)
         if not player then return false end
-
         local ppos = player:get_pos()
-        local nearest_pos = nil
-        local nearest_dist = math.huge
-
         for addr, data in pairs(local_gates) do
             local dist = vector.distance(ppos, data.pos)
-            if dist < nearest_dist then
-                nearest_dist = dist
-                nearest_pos = data.pos
-            end
-        end
-
-        if not nearest_pos then
-            -- Maybe it's an old base block not in local_gates. Search nearby.
-            for x = -3, 3 do
-                for y = -2, 6 do
-                    for z = -3, 3 do
-                        local p = {x = ppos.x + x, y = ppos.y + y, z = ppos.z + z}
-                        local node = core.get_node(p)
-                        if node.name == GATE_NODE then
-                            nearest_pos = p
-                            break
-                        end
-                    end
+            if dist < 10 then
+                -- Remove all gate blocks
+                for _, off in ipairs(KEYSTONE_OFFSETS) do
+                    local p = {x = data.pos.x + off[1], y = data.pos.y + off[2], z = data.pos.z + off[3]}
+                    core.remove_node(p)
                 end
+                for _, off in ipairs(SPAN_OFFSETS) do
+                    local p = {x = data.pos.x + off[1], y = data.pos.y + off[2], z = data.pos.z + off[3]}
+                    core.remove_node(p)
+                end
+                remove_event_horizon(data.pos)
+                core.remove_node(data.pos)
+                return true, "Stargate removed: " .. addr
             end
         end
-
-        if not nearest_pos then
-            return false, "No stargate found nearby"
-        end
-
-        -- Remove all keystones
-        for _, off in ipairs(KEYSTONE_OFFSETS) do
-            local p = {x = nearest_pos.x + off[1], y = nearest_pos.y + off[2], z = nearest_pos.z + off[3]}
-            if is_keystone(core.get_node(p).name) or core.get_node(p).name == SPAN_NODE then
-                core.remove_node(p)
-            end
-            -- Also clean up old ring nodes
-            local old_ring = core.get_node(p)
-            if old_ring.name == "nexus:gate_ring" then
-                core.remove_node(p)
-            end
-        end
-        -- Remove event horizon
-        remove_event_horizon(nearest_pos)
-        -- Remove base block
-        if core.get_node(nearest_pos).name == GATE_NODE then
-            core.remove_node(nearest_pos)
-        end
-
-        return true, "Stargate removed"
+        return false, "No gate found nearby"
     end,
 })
 
--- /closegate — close the nearest gate's link
-core.register_chatcommand("closegate", {
-    params = "",
-    description = "Close the nearest stargate's wormhole",
-    privs = {},
-    func = function(name)
-        local player = core.get_player_by_name(name)
-        if not player then return false end
-
-        local ppos = player:get_pos()
-        local nearest_addr = nil
-        local nearest_dist = math.huge
-        for addr, data in pairs(local_gates) do
-            local dist = vector.distance(ppos, data.pos)
-            if dist < nearest_dist then
-                nearest_dist = dist
-                nearest_addr = addr
-            end
-        end
-
-        if not nearest_addr then
-            return false, "No stargate found"
-        end
-
-        nexus.gate.close_link(nearest_addr, function()
-            gate_state[nearest_addr] = "idle"
-            gate_link_tiers[nearest_addr] = nil
-            core.chat_send_player(name, "[nexus] Wormhole closed.")
-            local gate_data = local_gates[nearest_addr]
-            if gate_data then
-                remove_event_horizon(gate_data.pos)
-                reset_keystones(gate_data.pos)
-                core.sound_play("nexus_gate_close", {
-                    pos = gate_data.center or gate_data.pos,
-                    max_hear_distance = 30, gain = 0.8
-                })
-            end
-        end)
-        return true
-    end,
-})
-
--- /gates — list all gates on this server
 core.register_chatcommand("gates", {
     params = "",
-    description = "List all stargates on this server",
+    description = "List all gates and their symbols",
     privs = {},
     func = function(name)
         if next(local_gates) == nil then
-            return true, "No stargates on this server."
+            return true, "No gates registered."
         end
-        local lines = {"Stargates on " .. GALAXY .. ":"}
+        local lines = {"Gates:"}
         for addr, data in pairs(local_gates) do
-            local linked = gate_state[addr] == "connected" and " [LINKED]" or ""
-            local p = data.pos
-            table.insert(lines, "  " .. addr .. " at (" ..
-                p.x .. "," .. p.y .. "," .. p.z .. ")" .. linked)
+            local state = gate_state[addr] or "idle"
+            local linked = active_links[addr] and " [LINKED]" or ""
+            local tier = nexus.power.tier_for(GALAXY, data.dimension, GALAXY, data.dimension)
+            local glyphs = compute_dial_sequence(addr, tier)
+            local symbols = nexus.glyphs.get_colored_symbols(glyphs)
+            table.insert(lines, symbols .. "  [" .. data.dimension .. "]" .. linked)
         end
         return true, table.concat(lines, "\n")
     end,
 })
 
--- =============================================================================
--- Link State Refresh (catch incoming links)
--- =============================================================================
-
--- Periodically poll the proxy for link state to catch links established
--- from the other direction (incoming wormholes).
--- Also places/removes the event horizon visual when link state changes.
--- Track in-flight link queries to prevent race conditions
--- (don't fire a new query until the previous one returns)
-local link_query_pending = {}
-
-local refresh_timer = 0
-core.register_globalstep(function(dtime)
-    refresh_timer = refresh_timer + dtime
-    if refresh_timer < 2.0 then return end
-    refresh_timer = 0
-
-    for address, gate_data in pairs(local_gates) do
-        if not link_query_pending[address] then
-            link_query_pending[address] = true
-
-            nexus.gate.get_link(address, function(link)
-                link_query_pending[address] = false
-                core.log("action", "[nexus] poller: " .. address .. " state=" .. (gate_state[address] or "nil") .. " linked=" .. tostring(link and link.linked))
-
-                local is_linked = link and link.linked
-                local state = gate_state[address] or "idle"
-
-                -- NEVER touch visuals while dialing
-                if state == "dialing" then return end
-
-                if is_linked then
-                    if state == "idle" then
-                        gate_state[address] = "receiving"
-                        place_event_horizon(gate_data.pos)
-                        -- Light keystones with the remote gate's glyph sequence
-                        if link.remote_address then
-                            local remote_route = address_to_route(link.remote_address)
-                            local my_galaxy = nexus._config.galaxy_name or ""
-                            local my_world = nexus._config.world_name or ""
-                            local remote_tier = nexus.power.tier_for(
-                                my_galaxy, my_world,
-                                (remote_route and remote_route.galaxy) or my_galaxy,
-                                (remote_route and remote_route.world) or my_world)
-                            local symbols = compute_dial_sequence(link.remote_address, remote_tier)
-                            -- Light all keystones at once (receiving gate doesn't sequence)
-                            for i, sym_idx in ipairs(symbols) do
-                                local ks_idx = ((i - 1) % 7) + 1
-                                local off = KEYSTONE_OFFSETS[ks_idx]
-                                if off then
-                                    local kp = {x = gate_data.pos.x + off[1], y = gate_data.pos.y + off[2], z = gate_data.pos.z + off[3]}
-                                    local color = KEYSTONE_COLORS[sym_idx] or "white"
-                                    local node = core.get_node(kp)
-                                    if node.name == KEYSTONE_OFF or is_keystone(node.name) then
-                                        core.swap_node(kp, {name = keystone_lit_name(color)})
-                                    end
-                                end
-                            end
-                        end
-                        core.sound_play("nexus_gate_open", {
-                            pos = gate_data.center, max_hear_distance = 30, gain = 0.6
-                        })
-                    elseif state == "connected" or state == "receiving" then
-                        -- Reconciliation: ensure horizon + keystones exist
-                        place_event_horizon(gate_data.pos)
-                        -- Light keystones if they're off (receiving gate)
-                        if link.remote_address then
-                            for _, off in ipairs(KEYSTONE_OFFSETS) do
-                                local kp = {x = gate_data.pos.x + off[1], y = gate_data.pos.y + off[2], z = gate_data.pos.z + off[3]}
-                                if core.get_node(kp).name == KEYSTONE_OFF then
-                                    -- Keystones are off but should be lit — light them
-                                    local remote_route = address_to_route(link.remote_address)
-                                    local my_galaxy = nexus._config.galaxy_name or ""
-                                    local my_world = nexus._config.world_name or ""
-                                    local remote_tier = nexus.power.tier_for(
-                                        my_galaxy, my_world,
-                                        (remote_route and remote_route.galaxy) or my_galaxy,
-                                        (remote_route and remote_route.world) or my_world)
-                                    local symbols = compute_dial_sequence(link.remote_address, remote_tier)
-                                    for i, sym_idx in ipairs(symbols) do
-                                        local ks_idx = ((i - 1) % 7) + 1
-                                        local ks_off = KEYSTONE_OFFSETS[ks_idx]
-                                        if ks_off then
-                                            local kp2 = {x = gate_data.pos.x + ks_off[1], y = gate_data.pos.y + ks_off[2], z = gate_data.pos.z + ks_off[3]}
-                                            local color = KEYSTONE_COLORS[sym_idx] or "white"
-                                            if core.get_node(kp2).name == KEYSTONE_OFF then
-                                                core.swap_node(kp2, {name = keystone_lit_name(color)})
-                                            end
-                                        end
-                                    end
-                                    break  -- only need to do this once per poll
-                                end
-                            end
-                        end
-                    end
-                else
-                    if state == "connected" or state == "receiving" then
-                        gate_state[address] = "idle"
-                        gate_link_tiers[address] = nil
-                        remove_event_horizon(gate_data.pos)
-                        reset_keystones(gate_data.pos)
-                        core.sound_play("nexus_gate_close", {
-                            pos = gate_data.center, max_hear_distance = 30, gain = 0.6
-                        })
-                    elseif state == "idle" then
-                        remove_event_horizon(gate_data.pos)
-                        reset_keystones(gate_data.pos)
-                    end
-                end
-            end)
+core.register_chatcommand("closegate", {
+    params = "",
+    description = "Close the nearest gate's wormhole",
+    privs = {},
+    func = function(name)
+        local player = core.get_player_by_name(name)
+        if not player then return false end
+        local ppos = player:get_pos()
+        for addr, data in pairs(local_gates) do
+            if vector.distance(ppos, data.pos) < 10 then
+                close_link(addr)
+                return true, "Wormhole closed."
+            end
         end
-    end
-end)
--- Cleanup cooldown on leave
-core.register_on_leaveplayer(function(player)
-    arrival_cooldown[player:get_player_name()] = nil
-end)
+        return false, "No gate found nearby"
+    end,
+})
 
--- =============================================================================
--- Public API for nexus_power (upkeep support)
--- =============================================================================
-
---- Return all local gates (address → gate_data) for upkeep iteration
-function nexus.gate.get_local_gates()
-    return local_gates
-end
-
---- Is this gate's wormhole currently open AND did this gate initiate the dial?
---- Only the origin gate pays upkeep — the receiving gate doesn't.
-function nexus.gate.is_dial_origin(address)
-    return gate_state[address] == "connected" and gate_link_tiers[address] ~= nil
-end
-
---- Get the power tier of the active link for this gate (for upkeep cost)
-function nexus.gate.get_link_tier(address)
-    return gate_link_tiers[address] or nexus.power.TIER.SAME_WORLD
-end
-
-core.log("action", "[nexus] gate system loaded")
+core.log("action", "[nexus] gate system loaded — dimension-based travel")
